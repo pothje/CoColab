@@ -1,0 +1,6 @@
+{
+  "name": "ColabForge — MiniMax H3 Otomasyon & Guardrail Stüdyosu",
+  "description": "Google Colab A100 80GB/40GB GPU doğrulama, klasör şeması eşleştirme, adaptif HuggingFace model yükleme ve sıfır kredi Colab MCP otomasyon mimarisi.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
