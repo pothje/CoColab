@@ -5,6 +5,11 @@ import {
   ColabProject,
   ProjectAssetFile,
 } from '../types/automation';
+import {
+  buildBlenderColabStagePython,
+  DEFAULT_BLENDER_RENDER_CONFIG,
+} from './blenderModule';
+import { getDeliveryPreset, resolveAssetMediaRole } from './claudeBundle';
 
 function splitLinesForNotebook(source: string): string[] {
   const lines = source.split('\n');
@@ -17,10 +22,11 @@ export function generateManifestJson(
 ): string {
   const activeAssets = assets.filter((a) => a.included);
   const manifest = {
-    schema_version: '2.2',
+    schema_version: '2.3',
     engine: 'ComfyUI',
     workspace_root: config.workspaceRoot,
     comfyui: config.comfyui,
+    blender_render: config.blenderRender ?? DEFAULT_BLENDER_RENDER_CONFIG,
     local_output_primary: config.localOutputPrimary,
     auto_sync_outputs_to_drive: config.autoSyncOutputsToDrive,
     drive_backup_dir: config.driveBackupDir,
@@ -38,10 +44,14 @@ export function generateManifestJson(
       comfyui_workflow: activeAssets.filter((a) => a.kind === 'comfyui_workflow').length,
       reference_media: activeAssets.filter((a) => a.kind === 'reference_media').length,
       blender_graybox: activeAssets.filter((a) => a.kind === 'blender_graybox').length,
+      blender_scene: activeAssets.filter((a) => resolveAssetMediaRole(a) === 'blender_scene').length,
+      first_frame: activeAssets.filter((a) => resolveAssetMediaRole(a) === 'first_frame').length,
+      last_frame: activeAssets.filter((a) => resolveAssetMediaRole(a) === 'last_frame').length,
     },
     files: activeAssets.map((a) => ({
       name: a.name,
       kind: a.kind,
+      media_role: resolveAssetMediaRole(a),
       source_relative_path: a.relativePath,
       colab_target_path: a.targetColabPath,
       size_bytes: a.sizeBytes,
@@ -60,6 +70,13 @@ export function generateBatchQueueJson(
   const jobs = queue.map((item, idx) => {
     const proj = projectMap.get(item.projectId);
     const activeFiles = (proj?.assets ?? []).filter((a) => a.included);
+    const presetSpec = getDeliveryPreset(item.deliveryPreset ?? proj?.deliveryPreset);
+    const hasBlend = activeFiles.some((a) => resolveAssetMediaRole(a) === 'blender_scene');
+    const hasPreRendered = activeFiles.some(
+      (a) =>
+        resolveAssetMediaRole(a) === 'blender_rendered' &&
+        /\.(mp4|mov|webm)$/i.test(a.name)
+    );
     return {
       order: idx + 1,
       job_id: item.id,
@@ -67,12 +84,17 @@ export function generateBatchQueueJson(
       project_name: item.projectName,
       scene_label: item.sceneLabel,
       status: item.status,
+      delivery_preset: presetSpec.id,
+      width: presetSpec.width,
+      height: presetSpec.height,
+      requires_blender_render: item.requiresBlenderRender ?? (hasBlend && !hasPreRendered),
       estimated_render_min: item.estimatedRenderMin,
       local_output_dir: `05_outputs/renders/${item.id}`,
       colab_output_dir: `${config.workspaceRoot}/outputs/${item.projectId}/${item.id}`,
       files: activeFiles.map((a) => ({
         name: a.name,
         kind: a.kind,
+        media_role: resolveAssetMediaRole(a),
         source_relative_path: a.relativePath,
         colab_target_path: a.targetColabPath,
       })),
@@ -83,9 +105,10 @@ export function generateBatchQueueJson(
 
   return JSON.stringify(
     {
-      schema_version: '1.2',
+      schema_version: '1.3',
       engine: 'ComfyUI',
       comfyui_port: config.comfyui.comfyPort,
+      blender_render: config.blenderRender ?? DEFAULT_BLENDER_RENDER_CONFIG,
       single_setup_minutes_estimate: config.setupMinutesEstimate,
       local_output_primary: config.localOutputPrimary,
       auto_sync_outputs_to_drive: config.autoSyncOutputsToDrive,
@@ -639,7 +662,14 @@ send_telemetry({
 print("[Tamamlandı] Model ağırlıkları hazır:", DOWNLOAD_MODELS_DIR)
 `;
 
-  const cell4 = `# @title 4. Proje Dosyalarını Enjekte Et & Başsız ComfyUI Sunucusunu Başlat
+  const activeProjectPreset = getDeliveryPreset(projects[0]?.deliveryPreset);
+  const blenderStagePy = buildBlenderColabStagePython(
+    config.blenderRender ?? DEFAULT_BLENDER_RENDER_CONFIG,
+    activeProjectPreset.width,
+    activeProjectPreset.height
+  );
+
+  const cell4 = `# @title 4. Proje Dosyalarını Enjekte Et, Varsayılan .blend Renderla (OptiX) & Başsız ComfyUI Başlat
 import os, json, shutil, subprocess, time, urllib.request
 from pathlib import Path
 
@@ -670,6 +700,8 @@ for item in MANIFEST["files"]:
         # ComfyUI LoadImage/LoadVideo düğümleri dosya adını doğrudan ComfyUI/input kökünde de arar
         if item["kind"] in ("reference_media", "blender_graybox"):
             shutil.copy2(src, COMFY_ROOT / "input" / item["name"])
+
+${blenderStagePy}
 
 comfy_proc = subprocess.Popen(
     ["python", "main.py", *COMFY_FLAGS],
@@ -834,11 +866,30 @@ for idx, job in enumerate(jobs, start=1):
     out_dir = Path(job.get("colab_output_dir") or (WORKSPACE_ROOT / "outputs" / job["job_id"]))
     out_dir.mkdir(parents=True, exist_ok=True)
     prompts = {p.name: p.read_text(encoding="utf-8", errors="ignore") for p in (WORKSPACE_ROOT / "prompts").glob("*")}
-    graybox_assets = sorted([p.name for p in (COMFY_ROOT / "input/blender_graybox").glob("*")])
+    graybox_assets = sorted([
+        p.name for p in (COMFY_ROOT / "input/blender_graybox").glob("*")
+        if p.suffix.lower() in (".mp4", ".mov", ".webm", ".png", ".jpg", ".jpeg")
+    ])
+    first_frame_candidates = [
+        item["name"] for item in MANIFEST.get("files", [])
+        if item.get("media_role") == "first_frame"
+    ]
+    last_frame_candidates = [
+        item["name"] for item in MANIFEST.get("files", [])
+        if item.get("media_role") == "last_frame"
+    ]
+    if not first_frame_candidates and (COMFY_ROOT / "input/first_frame_blender.png").exists():
+        first_frame_candidates = ["first_frame_blender.png"]
+    if not last_frame_candidates and (COMFY_ROOT / "input/last_frame_blender.png").exists():
+        last_frame_candidates = ["last_frame_blender.png"]
 
-    # Aktif GPU kademesine, VAEDecodeTiled ve opsiyonel Turbo/TeaCache ön ayarlarına göre düğümleri güncelle
+    job_width = int(job.get("width", 1024))
+    job_height = int(job.get("height", 768))
+
+    # Aktif GPU kademesine, İlk/Son Kare, Etsy/Sosyal çözünürlük, VAEDecodeTiled ve opsiyonel Turbo/TeaCache ön ayarlarına göre düğümleri güncelle
     wf = json.loads(json.dumps(base_workflow))
     unet_node_id = None
+    load_image_idx = 0
     for node_id, node in list(wf.items()):
         if not isinstance(node, dict):
             continue
@@ -861,6 +912,18 @@ for idx, job in enumerate(jobs, start=1):
             inputs["text"] = prompts["master_prompt.txt"]
         elif cls == "LoadVideo" and graybox_assets:
             inputs["file"] = graybox_assets[0]
+        elif cls == "LoadImage":
+            role_hint = str(inputs.get("role", "")).lower()
+            if role_hint == "first_frame" or (load_image_idx == 0 and first_frame_candidates):
+                if first_frame_candidates:
+                    inputs["image"] = first_frame_candidates[0]
+            elif role_hint == "last_frame" or (load_image_idx >= 1 and last_frame_candidates):
+                if last_frame_candidates:
+                    inputs["image"] = last_frame_candidates[0]
+            load_image_idx += 1
+        elif cls in ("EmptyLatentImage", "EmptyHunyuanLatentVideo", "EmptyLTXVLatentVideo"):
+            inputs["width"] = job_width
+            inputs["height"] = job_height
         elif cls == "VAEDecode" and USE_TILED_VAE:
             node["class_type"] = "VAEDecodeTiled"
             inputs["tile_size"] = VAE_TILE_SIZE
@@ -870,7 +933,8 @@ for idx, job in enumerate(jobs, start=1):
         elif cls == "KSampler" and ENABLE_TURBO_LORA and (COMFY_ROOT / "models/loras" / TURBO_LORA_FILE).exists():
             inputs["steps"] = TURBO_STEPS
         elif cls == "VHS_VideoCombine":
-            inputs["filename_prefix"] = f"{job.get('job_id', 'scene')}_MiniMaxH3"
+            preset_tag = job.get("delivery_preset", "etsy")
+            inputs["filename_prefix"] = f"{job.get('job_id', 'scene')}_{preset_tag}_MiniMaxH3"
 
     original_unet_id = unet_node_id
     # Koşullu 8-Step Turbo LoRA & TeaCache enjeksiyonu

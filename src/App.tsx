@@ -37,11 +37,8 @@ import { usePWAInstall } from './hooks/usePWAInstall';
 import { TopBar } from './components/TopBar';
 import { ProjectDashboard } from './components/ProjectDashboard';
 import { DesktopWorkbenchView } from './components/DesktopWorkbenchView';
-import { OnboardingView } from './components/OnboardingView';
 import { ColabConsoleView } from './components/ColabConsoleView';
-import { ClaudeMcpView } from './components/ClaudeMcpView';
-import { AnalysisView } from './components/AnalysisView';
-import { ComfyModelInstallerView } from './components/ComfyModelInstallerView';
+import { SetupHubView } from './components/SetupHubView';
 import { MacInstallModal } from './components/MacInstallModal';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import {
@@ -53,6 +50,15 @@ import {
   evaluateBatchSchedule,
   triggerQueuedBatchStart,
 } from './utils/batchScheduler';
+import { estimateJobActualRenderMin } from './utils/renderThroughput';
+import { DEFAULT_BLENDER_RENDER_CONFIG } from './utils/blenderModule';
+import {
+  DELIVERY_PRESETS,
+  inspectProjectPipelineReadiness,
+  parseClaudeBundleToProject,
+} from './utils/claudeBundle';
+import type { RawFileInput } from './utils/guardrailEngine';
+import type { DeliveryPresetId } from './types/automation';
 
 const STORAGE_KEYS = {
   projects: 'colabforge_projects_v2',
@@ -107,6 +113,10 @@ function loadPersistedConfig(): AutomationConfig {
         batchSchedule: {
           ...DEFAULT_AUTOMATION_CONFIG.batchSchedule,
           ...(parsed.batchSchedule ?? {}),
+        },
+        blenderRender: {
+          ...DEFAULT_BLENDER_RENDER_CONFIG,
+          ...(parsed.blenderRender ?? {}),
         },
       };
     }
@@ -208,9 +218,18 @@ export default function App() {
         )
       );
       if (batchJobId) {
+        const nowStamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
         setBatchQueue((prev) =>
           prev.map((job) =>
-            job.id === batchJobId ? { ...job, status: 'tamamlandi' } : job
+            job.id === batchJobId
+              ? {
+                  ...job,
+                  status: 'tamamlandi',
+                  completedAt: nowStamp,
+                  actualRenderMin:
+                    job.actualRenderMin ?? estimateJobActualRenderMin(job, 'tamamlandi'),
+                }
+              : job
           )
         );
       }
@@ -307,7 +326,11 @@ export default function App() {
     );
   }
 
-  function handleCreateProject(name: string, description: string) {
+  function handleCreateProject(
+    name: string,
+    description: string,
+    deliveryPreset: DeliveryPresetId = 'etsy_4_3'
+  ) {
     const id = `proj-${Date.now()}`;
     const nextProject: ColabProject = {
       id,
@@ -315,6 +338,8 @@ export default function App() {
       description,
       updatedAt: new Date().toISOString().slice(0, 10),
       targetGpuPolicy: '80GB_OR_40GB',
+      deliveryPreset,
+      sourceBundleFormat: 'manual',
       assets: classifyProjectFiles(
         SAMPLE_PROJECT_FILES_SEED.slice(0, 6),
         config.workspaceRoot
@@ -323,6 +348,83 @@ export default function App() {
     };
     setProjects((prev) => [nextProject, ...prev]);
     setActiveProjectId(id);
+  }
+
+  function handleImportClaudeBundle(
+    rawFiles: RawFileInput[],
+    options?: { openInStudio?: boolean; autoQueueEtsyAndReels?: boolean }
+  ): ColabProject | null {
+    if (rawFiles.length === 0) return null;
+    const imported = parseClaudeBundleToProject(rawFiles, config.workspaceRoot);
+    setProjects((prev) => [imported, ...prev]);
+    setActiveProjectId(imported.id);
+    if (options?.autoQueueEtsyAndReels) {
+      const readiness = inspectProjectPipelineReadiness(imported, config.blenderRender);
+      const nowStamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
+      setBatchQueue((prev) => [
+        ...prev,
+        {
+          id: `batch-${Date.now()}-etsy`,
+          projectId: imported.id,
+          projectName: imported.name,
+          sceneLabel: `${imported.name} · Etsy 4:3`,
+          status: 'kuyrukta',
+          addedAt: nowStamp,
+          estimatedRenderMin: 3,
+          deliveryPreset: 'etsy_4_3',
+          requiresBlenderRender: readiness.requiresColabBlenderRender,
+        },
+        {
+          id: `batch-${Date.now() + 1}-reels`,
+          projectId: imported.id,
+          projectName: imported.name,
+          sceneLabel: `${imported.name} · Reels 9:16`,
+          status: 'kuyrukta',
+          addedAt: nowStamp,
+          estimatedRenderMin: 3,
+          deliveryPreset: 'social_9_16',
+          requiresBlenderRender: false,
+        },
+      ]);
+    }
+    if (options?.openInStudio) {
+      setActiveTab('workbench');
+    }
+    return imported;
+  }
+
+  function handleUpdateProjectDeliveryPreset(
+    projectId: string,
+    deliveryPreset: DeliveryPresetId
+  ) {
+    const preset = DELIVERY_PRESETS[deliveryPreset];
+    setProjects((prev) =>
+      prev.map((p) => {
+        if (p.id !== projectId) return p;
+        return {
+          ...p,
+          deliveryPreset,
+          updatedAt: new Date().toISOString().slice(0, 10),
+          assets: p.assets.map((asset) => {
+            if (asset.name !== 'runtime_settings.json' || !asset.previewText) return asset;
+            try {
+              const parsed = JSON.parse(asset.previewText) as Record<string, unknown>;
+              parsed.delivery_preset = preset.id;
+              parsed.resolution = `${preset.width}x${preset.height}`;
+              parsed.aspect_ratio = preset.aspectLabel;
+              const nextText = JSON.stringify(parsed, null, 2);
+              return {
+                ...asset,
+                previewText: nextText,
+                sizeBytes: new Blob([nextText]).size,
+              };
+            } catch {
+              return asset;
+            }
+          }),
+        };
+      })
+    );
   }
 
   function handleDeleteProject(id: string) {
@@ -422,9 +524,14 @@ export default function App() {
     );
   }
 
-  function handleAddBatchJob(projectId: string, sceneLabel: string) {
+  function handleAddBatchJob(
+    projectId: string,
+    sceneLabel: string,
+    deliveryPreset?: DeliveryPresetId
+  ) {
     const proj = projects.find((p) => p.id === projectId);
     if (!proj) return;
+    const readiness = inspectProjectPipelineReadiness(proj, config.blenderRender);
     const nextJob: BatchQueueItem = {
       id: `batch-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
       projectId: proj.id,
@@ -433,8 +540,43 @@ export default function App() {
       status: 'kuyrukta',
       addedAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
       estimatedRenderMin: 3,
+      deliveryPreset: deliveryPreset ?? proj.deliveryPreset ?? 'etsy_4_3',
+      requiresBlenderRender: readiness.requiresColabBlenderRender,
     };
     setBatchQueue((prev) => [...prev, nextJob]);
+  }
+
+  function handleAddEtsyAndSocialPair(projectId: string) {
+    const proj = projects.find((p) => p.id === projectId);
+    if (!proj) return;
+    const readiness = inspectProjectPipelineReadiness(proj, config.blenderRender);
+    const nowStamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
+    const baseCount = batchQueue.filter((j) => j.projectId === projectId).length;
+    setBatchQueue((prev) => [
+      ...prev,
+      {
+        id: `batch-${Date.now()}-e`,
+        projectId: proj.id,
+        projectName: proj.name,
+        sceneLabel: `${proj.name} · Etsy 4:3 (#${baseCount + 1})`,
+        status: 'kuyrukta',
+        addedAt: nowStamp,
+        estimatedRenderMin: 3,
+        deliveryPreset: 'etsy_4_3',
+        requiresBlenderRender: readiness.requiresColabBlenderRender,
+      },
+      {
+        id: `batch-${Date.now() + 1}-s`,
+        projectId: proj.id,
+        projectName: proj.name,
+        sceneLabel: `${proj.name} · Reels 9:16 (#${baseCount + 2})`,
+        status: 'kuyrukta',
+        addedAt: nowStamp,
+        estimatedRenderMin: 3,
+        deliveryPreset: 'social_9_16',
+        requiresBlenderRender: false,
+      },
+    ]);
   }
 
   function handleReorderBatchJob(index: number, direction: 'up' | 'down') {
@@ -486,27 +628,58 @@ export default function App() {
   function handleSetProjectStatus(projectId: string, nextStatus: DashboardStageKey) {
     const proj = projects.find((p) => p.id === projectId);
     if (!proj) return;
+    const nowStamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
+    const defaultTier: '80GB' | '40GB' =
+      proj.targetGpuPolicy === '80GB_ONLY' ? '80GB' : '40GB';
 
     setBatchQueue((prev) => {
       const hasProjectJobs = prev.some((job) => job.projectId === projectId);
       if (!hasProjectJobs) {
+        const draftJob: BatchQueueItem = {
+          id: `batch-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+          projectId: proj.id,
+          projectName: proj.name,
+          sceneLabel: `${proj.name} · Sahne 01`,
+          status: nextStatus,
+          addedAt: nowStamp,
+          estimatedRenderMin: 3,
+          gpuTierUsed: defaultTier,
+        };
         return [
           ...prev,
           {
-            id: `batch-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
-            projectId: proj.id,
-            projectName: proj.name,
-            sceneLabel: `${proj.name} · Sahne 01`,
-            status: nextStatus,
-            addedAt: new Date().toISOString().slice(0, 16).replace('T', ' '),
-            estimatedRenderMin: 3,
+            ...draftJob,
+            startedAt: nextStatus === 'kuyrukta' ? null : nowStamp,
+            completedAt: nextStatus === 'tamamlandi' ? nowStamp : null,
+            actualRenderMin:
+              nextStatus === 'kuyrukta'
+                ? null
+                : estimateJobActualRenderMin(draftJob, nextStatus),
           },
         ];
       }
 
-      return prev.map((job) =>
-        job.projectId === projectId ? { ...job, status: nextStatus } : job
-      );
+      return prev.map((job) => {
+        if (job.projectId !== projectId) return job;
+        if (nextStatus === 'kuyrukta') {
+          return {
+            ...job,
+            status: nextStatus,
+            startedAt: null,
+            completedAt: null,
+            actualRenderMin: null,
+          };
+        }
+        return {
+          ...job,
+          status: nextStatus,
+          startedAt: job.startedAt ?? nowStamp,
+          completedAt: nextStatus === 'tamamlandi' ? (job.completedAt ?? nowStamp) : null,
+          actualRenderMin:
+            job.actualRenderMin ?? estimateJobActualRenderMin(job, nextStatus),
+          gpuTierUsed: job.gpuTierUsed ?? defaultTier,
+        };
+      });
     });
   }
 
@@ -523,6 +696,15 @@ export default function App() {
         )
       );
     }
+  }
+
+  function handleUpdateProjectGpuPolicy(
+    projectId: string,
+    nextPolicy: ColabProject['targetGpuPolicy']
+  ) {
+    setProjects((prev) =>
+      prev.map((p) => (p.id === projectId ? { ...p, targetGpuPolicy: nextPolicy } : p))
+    );
   }
 
   function handleSelectAndOpenProject(projectId: string) {
@@ -554,7 +736,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[#F8F9FB] text-slate-900">
+    <div className="min-h-screen bg-[#09090B] text-[#F5F5F7]">
       <TopBar
         activeTab={activeTab}
         onSelectTab={setActiveTab}
@@ -569,10 +751,12 @@ export default function App() {
             projects={projects}
             activeProjectId={activeProject.id}
             batchQueue={batchQueue}
+            config={config}
             telemetry={telemetry}
             onSelectAndOpenProject={handleSelectAndOpenProject}
             onOpenProjectInColab={handleOpenProjectInColab}
             onCreateProject={handleCreateProject}
+            onImportClaudeBundle={handleImportClaudeBundle}
             onUpdateProjectDetails={handleUpdateProjectDetails}
             onDeleteProject={handleDeleteProject}
             onSetProjectStatus={handleSetProjectStatus}
@@ -597,6 +781,8 @@ export default function App() {
             pingSending={pingSending}
             onSelectProject={setActiveProjectId}
             onCreateProject={handleCreateProject}
+            onImportClaudeBundle={handleImportClaudeBundle}
+            onUpdateProjectDeliveryPreset={handleUpdateProjectDeliveryPreset}
             onDeleteProject={handleDeleteProject}
             onUpdateProjectAssets={handleUpdateProjectAssets}
             onUpdateAssetContent={handleUpdateAssetContent}
@@ -604,48 +790,21 @@ export default function App() {
             onAddOutputToProject={handleAddOutputToProject}
             onAddRevisionFeedback={handleAddRevisionFeedback}
             onAddToBatchQueue={handleAddBatchJob}
+            onAddEtsyAndSocialPair={handleAddEtsyAndSocialPair}
             onReorderBatchJob={handleReorderBatchJob}
             onRemoveBatchJob={handleRemoveBatchJob}
             onConnectDrive={handleConnectDrive}
-            onSendBridgePing={() => sendBridgePing(activeProject.id, batchQueue.length)}
+            onSendBridgePing={(preset) =>
+              sendBridgePing(activeProject.id, batchQueue.length, preset)
+            }
             onResetTelemetry={resetTelemetry}
             onDownloadFile={triggerDownload}
             onNavigate={setActiveTab}
           />
         </main>
       ) : (
-        <main className="mx-auto max-w-[1600px] px-5 py-6 lg:px-6">
-          {activeTab === 'kurulum' && (
-            <OnboardingView
-              onboarding={onboarding}
-              onUpdateOnboarding={setOnboarding}
-              config={config}
-              onUpdateConfig={setConfig}
-              activeProject={activeProject}
-              driveUserEmail={driveUserEmail}
-              driveAccessToken={driveAccessToken}
-              isSigningIn={isSigningIn}
-              onConnectDrive={handleConnectDrive}
-              onDisconnectDrive={handleDisconnectDrive}
-              onDownloadFile={triggerDownload}
-              onNavigate={setActiveTab}
-            />
-          )}
-
-          {activeTab === 'models' && (
-            <ComfyModelInstallerView
-              config={config}
-              onUpdateConfig={setConfig}
-              driveUserEmail={driveUserEmail}
-              driveAccessToken={driveAccessToken}
-              isSigningIn={isSigningIn}
-              onConnectDrive={handleConnectDrive}
-              onDownloadFile={triggerDownload}
-              onNavigate={setActiveTab}
-            />
-          )}
-
-          {activeTab === 'colab' && (
+        <main className="mx-auto max-w-[1440px] px-4 py-8 lg:px-8">
+          {activeTab === 'colab' ? (
             <ColabConsoleView
               project={activeProject}
               projects={projects}
@@ -659,6 +818,7 @@ export default function App() {
               onConnectDrive={handleConnectDrive}
               onDownloadFile={triggerDownload}
               onAddBatchJob={handleAddBatchJob}
+              onAddEtsyAndSocialPair={handleAddEtsyAndSocialPair}
               onReorderBatchJob={handleReorderBatchJob}
               onRemoveBatchJob={handleRemoveBatchJob}
               onClearCompletedBatchJobs={handleClearCompletedBatchJobs}
@@ -667,29 +827,32 @@ export default function App() {
               wsStatus={wsStatus}
               ingestToken={ingestToken}
               pingSending={pingSending}
-              onSendBridgePing={() => sendBridgePing(activeProject.id, batchQueue.length)}
+              onSendBridgePing={(preset) =>
+                sendBridgePing(activeProject.id, batchQueue.length, preset)
+              }
               onResetTelemetry={resetTelemetry}
+              onSelectProject={setActiveProjectId}
+              onUpdateProjectGpuPolicy={handleUpdateProjectGpuPolicy}
             />
-          )}
-
-          {activeTab === 'claude' && (
-            <ClaudeMcpView
-              project={activeProject}
+          ) : (
+            <SetupHubView
+              activeTab={activeTab}
+              onSelectTab={setActiveTab}
+              config={config}
+              onUpdateConfig={setConfig}
+              onboarding={onboarding}
+              onUpdateOnboarding={setOnboarding}
+              activeProject={activeProject}
               projects={projects}
               batchQueue={batchQueue}
-              config={config}
-              preferredOs={onboarding.preferredOs}
-              onDownloadFile={triggerDownload}
-              onNavigate={setActiveTab}
-            />
-          )}
-
-          {activeTab === 'denetim' && (
-            <AnalysisView
               findings={findings}
               onToggleFinding={handleToggleFinding}
-              assetCount={activeProject.assets.filter((a) => a.included).length}
-              onNavigate={setActiveTab}
+              driveUserEmail={driveUserEmail}
+              driveAccessToken={driveAccessToken}
+              isSigningIn={isSigningIn}
+              onConnectDrive={handleConnectDrive}
+              onDisconnectDrive={handleDisconnectDrive}
+              onDownloadFile={triggerDownload}
             />
           )}
         </main>

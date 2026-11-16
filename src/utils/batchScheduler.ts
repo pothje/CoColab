@@ -388,6 +388,9 @@ export function triggerQueuedBatchStart(queue: BatchQueueItem[]): {
   const startedJob: BatchQueueItem = {
     ...queue[targetIndex],
     status: 'hazirlaniyor',
+    startedAt:
+      queue[targetIndex].startedAt ??
+      new Date().toISOString().slice(0, 16).replace('T', ' '),
   };
 
   const nextQueue = queue.map((job, idx) =>

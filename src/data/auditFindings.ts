@@ -7,6 +7,7 @@ import {
   OnboardingState,
 } from '../types/automation';
 import { classifyProjectFiles } from '../utils/guardrailEngine';
+import { DEFAULT_BLENDER_RENDER_CONFIG } from '../utils/blenderModule';
 
 export const INITIAL_ONBOARDING_STATE: OnboardingState = {
   colabPlanConfirmed: false,
@@ -326,6 +327,7 @@ export const DEFAULT_AUTOMATION_CONFIG: AutomationConfig = {
     lastTriggeredAt: null,
     lastTriggerReason: null,
   },
+  blenderRender: DEFAULT_BLENDER_RENDER_CONFIG,
 };
 
 export const SAMPLE_PROJECT_FILES_SEED = [
@@ -503,6 +505,7 @@ export function createInitialProjects(workspaceRoot: string): ColabProject[] {
         'ComfyUI + MiniMax H3 grafiği üzerinde Blender clay kamera animasyonu ve stil referansıyla 720p 24fps iç mekan flythrough sahnesi.',
       updatedAt: '2026-11-14',
       targetGpuPolicy: '80GB_OR_40GB',
+      deliveryPreset: 'cinema_16_9',
       assets: classifyProjectFiles(SAMPLE_PROJECT_FILES_SEED, workspaceRoot),
       outputs: [
         {
@@ -524,9 +527,10 @@ export function createInitialProjects(workspaceRoot: string): ColabProject[] {
       id: 'proj-urun-studyo',
       name: 'Ürün Stüdyo Turu (40GB Mod)',
       description:
-        'ComfyUI INT8 + NVFP4 offload ile 360 derece Blender turntable graybox koşullandırmalı tanıtım klibi.',
+        'ComfyUI INT8 + NVFP4 offload ile 360 derece Blender turntable graybox koşullandırmalı Etsy ürün tanıtım klibi.',
       updatedAt: '2026-11-13',
       targetGpuPolicy: '80GB_OR_40GB',
+      deliveryPreset: 'etsy_4_3',
       assets: classifyProjectFiles(
         SAMPLE_PROJECT_FILES_SEED.slice(0, 8),
         workspaceRoot
@@ -537,9 +541,10 @@ export function createInitialProjects(workspaceRoot: string): ColabProject[] {
       id: 'proj-vitrin-sahne',
       name: 'Konsept Vitrin Kamera Geçişi',
       description:
-        'Doğal gün ışığı ve traverten materyal referansıyla 24fps mağaza vitrini kamera hareketi sahnesi.',
+        'Doğal gün ışığı ve traverten materyal referansıyla 24fps Reels/Sosyal Medya vitrin sahnesi.',
       updatedAt: '2026-11-15',
       targetGpuPolicy: '80GB_ONLY',
+      deliveryPreset: 'social_9_16',
       assets: classifyProjectFiles(
         SAMPLE_PROJECT_FILES_SEED.slice(0, 6),
         workspaceRoot
@@ -555,6 +560,35 @@ export function createInitialBatchQueue(projects: ColabProject[]): BatchQueueIte
     'Sahne 02 · Stüdyo Turntable',
     'Sahne 03 · Vitrin Panoraması',
   ];
+  const seedDurations: Array<{
+    estimatedRenderMin: number;
+    actualRenderMin: number | null;
+    startedAt: string | null;
+    completedAt: string | null;
+    gpuTierUsed: '80GB' | '40GB';
+  }> = [
+    {
+      estimatedRenderMin: 3.0,
+      actualRenderMin: 2.6,
+      startedAt: '2026-11-14 13:07',
+      completedAt: '2026-11-14 13:10',
+      gpuTierUsed: '80GB',
+    },
+    {
+      estimatedRenderMin: 3.0,
+      actualRenderMin: 3.9,
+      startedAt: '2026-11-14 14:02',
+      completedAt: null,
+      gpuTierUsed: '40GB',
+    },
+    {
+      estimatedRenderMin: 3.0,
+      actualRenderMin: null,
+      startedAt: null,
+      completedAt: null,
+      gpuTierUsed: '80GB',
+    },
+  ];
   return projects.map((proj, index) => {
     const status: BatchQueueItem['status'] =
       proj.outputs.length > 0 || index === 0
@@ -562,6 +596,13 @@ export function createInitialBatchQueue(projects: ColabProject[]): BatchQueueIte
         : index === 1
           ? 'isleniyor'
           : 'kuyrukta';
+    const timing = seedDurations[index] ?? {
+      estimatedRenderMin: 3.0,
+      actualRenderMin: status === 'tamamlandi' ? 2.8 : status === 'isleniyor' ? 1.8 : null,
+      startedAt: status === 'kuyrukta' ? null : '2026-11-14 14:10',
+      completedAt: status === 'tamamlandi' ? '2026-11-14 14:13' : null,
+      gpuTierUsed: proj.targetGpuPolicy === '80GB_ONLY' ? '80GB' : '40GB',
+    };
     return {
       id: `batch-${proj.id}-${index + 1}`,
       projectId: proj.id,
@@ -569,7 +610,11 @@ export function createInitialBatchQueue(projects: ColabProject[]): BatchQueueIte
       sceneLabel: sceneLabels[index] ?? `${proj.name} · Sahne 0${index + 1}`,
       status,
       addedAt: '2026-11-14 14:00',
-      estimatedRenderMin: 3,
+      estimatedRenderMin: timing.estimatedRenderMin,
+      actualRenderMin: timing.actualRenderMin,
+      startedAt: timing.startedAt,
+      completedAt: timing.completedAt,
+      gpuTierUsed: timing.gpuTierUsed,
     };
   });
 }

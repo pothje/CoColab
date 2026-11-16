@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Copy, Check, Download, ArrowRight } from 'lucide-react';
+import { ArrowRight, Check, ChevronDown, Copy, Download } from 'lucide-react';
 import { AutomationConfig, BatchQueueItem, ColabProject, WorkspaceTab } from '../types/automation';
 import {
   generateBatchQueueJson,
@@ -25,11 +25,11 @@ interface ClaudeMcpViewProps {
 }
 
 type DocTab =
+  | 'installer'
   | 'skill'
   | 'rules'
   | 'config'
   | 'mcp'
-  | 'installer'
   | 'batch'
   | 'manifest'
   | 'runner';
@@ -43,9 +43,10 @@ export function ClaudeMcpView({
   onDownloadFile,
   onNavigate,
 }: ClaudeMcpViewProps) {
-  const [activeDoc, setActiveDoc] = useState<DocTab>('skill');
+  const [activeDoc, setActiveDoc] = useState<DocTab>('installer');
   const [osTarget, setOsTarget] = useState<'windows' | 'macos_linux'>(preferredOs);
   const [copied, setCopied] = useState(false);
+  const [showFilesDrawer, setShowFilesDrawer] = useState(false);
 
   const mcpServerPy = useMemo(
     () => generateColabMcpServer(config, project.assets),
@@ -54,71 +55,55 @@ export function ClaudeMcpView({
 
   const docs = useMemo(
     () => ({
-      skill: {
-        label: 'Claude Yetenek Rehberi',
-        filename: 'SKILL.md',
-        mime: 'text/markdown;charset=utf-8',
-        description:
-          'Claude’un proje klasörünüzü doğru tanıması, promptları doğru yere kaydetmesi ve revizyon kurallarına uyması için rehber dosya.',
-        content: generateClaudeSkillMd(project, config),
-      },
-      rules: {
-        label: 'Proje Kuralları',
-        filename: 'CLAUDE.md',
-        mime: 'text/markdown;charset=utf-8',
-        description:
-          'Kişiye özel dosya yollarını engelleyen ve her bilgisayarda aynı şekilde çalışan güvenlik kuralları.',
-        content: generateClaudeRulesMd(project, config),
-      },
       installer: {
-        label: osTarget === 'windows' ? 'Tek Tık Kurucu (.ps1)' : 'Tek Tık Kurucu (.sh)',
+        label: osTarget === 'windows' ? 'Kurucu (.ps1)' : 'Kurucu (.sh)',
         filename:
           osTarget === 'windows'
             ? 'install_colabforge_mcp.ps1'
             : 'install_colabforge_mcp.sh',
         mime: 'text/plain;charset=utf-8',
-        description:
-          'Bilgisayarınızda hiçbir teknik ayar yapmadan tüm bağlantıları ve rehber dosyalarını otomatik kuran dosya.',
         content: generateMcpInstallerScript(osTarget, project, config, mcpServerPy),
       },
+      skill: {
+        label: 'SKILL.md',
+        filename: 'SKILL.md',
+        mime: 'text/markdown;charset=utf-8',
+        content: generateClaudeSkillMd(project, config),
+      },
+      rules: {
+        label: 'CLAUDE.md',
+        filename: 'CLAUDE.md',
+        mime: 'text/markdown;charset=utf-8',
+        content: generateClaudeRulesMd(project, config),
+      },
       config: {
-        label: 'Masaüstü Bağlantısı',
+        label: 'Masaüstü Ayarı',
         filename: 'claude_desktop_config.json',
         mime: 'application/json',
-        description:
-          'Claude masaüstü uygulamasının hem Google Colab hem de proje klasörünüze bağlanmasını sağlayan ayar.',
         content: generateClaudeDesktopConfigSnippet(osTarget, config),
       },
       mcp: {
-        label: 'Yerel Köprü Servisi',
+        label: 'MCP Köprüsü',
         filename: 'colab_mcp_server.py',
         mime: 'text/x-python',
-        description:
-          'Claude’un yalnızca izin verilen proje dosyalarını düzenlemesini sağlayan yerel bağlantı bileşeni.',
         content: mcpServerPy,
       },
       batch: {
-        label: 'Toplu Sıra Dosyası',
+        label: 'Sıra Listesi',
         filename: 'batch_queue_manifest.json',
         mime: 'application/json',
-        description:
-          'Tek oturumda art arda üretilecek tüm sahnelerin sırasını tutan liste.',
         content: generateBatchQueueJson(batchQueue, projects, config),
       },
       manifest: {
         label: 'Proje Haritası',
         filename: '01_routing_manifest.json',
         mime: 'application/json',
-        description:
-          'Aktif projenizdeki prompt, referans görsel ve 3D sahne dosyalarının eşleştirme listesi.',
         content: generateRoutingManifestJson(project, config),
       },
       runner: {
-        label: 'Otomatik Kontrolcü',
+        label: 'Kontrolcü',
         filename: 'local_zero_credit_runner.py',
         mime: 'text/x-python',
-        description:
-          'Ek yapay zeka kredisi harcamadan dosyalarınızı doğrulayıp hazırlayan yardımcı araç.',
         content: generateZeroCreditRunner(config, project.assets),
       },
     }),
@@ -146,38 +131,29 @@ export function ClaudeMcpView({
   }
 
   return (
-    <div className="space-y-6">
-      <section className="rounded-xl border border-slate-200 bg-white p-6 space-y-5">
+    <div className="space-y-6 text-[#F5F5F7]">
+      {/* Clean Hero + Primary Installer Download */}
+      <section className="rounded-2xl border border-white/[0.08] bg-[#141417] p-6 space-y-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <h1 className="text-xl font-bold text-slate-900">
+            <div className="text-xs font-medium text-[#0A84FF]">Claude Masaüstü Köprüsü</div>
+            <h1 className="mt-1 text-2xl font-semibold tracking-tight text-[#F5F5F7]">
               Claude &amp; Otomasyon Kurulum Paketi
             </h1>
-            <p className="mt-1 text-sm text-slate-600">
-              Teknik bilgi gerektirmeden Claude’u stüdyonuza bağlamak için hazır kurulum
-              dosyalarını buradan indirebilirsiniz.
+            <p className="mt-1 text-sm text-zinc-400">
+              İşletim sisteminizi seçin ve Claude’u stüdyonuza tek tıkla bağlayın.
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5 shrink-0">
-            {onNavigate && (
-              <button
-                type="button"
-                onClick={() => onNavigate('denetim')}
-                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:border-slate-300 hover:bg-slate-50 whitespace-nowrap"
-              >
-                <span>Sistem Özeti</span>
-                <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
-              </button>
-            )}
-            <div className="inline-flex rounded-lg border border-slate-200 bg-slate-100 p-1">
+            <div className="inline-flex rounded-xl border border-white/[0.06] bg-[#0E0E11] p-1">
               <button
                 type="button"
                 onClick={() => setOsTarget('windows')}
-                className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${
+                className={`rounded-lg px-3 py-1 text-xs font-medium transition-colors ${
                   osTarget === 'windows'
-                    ? 'bg-white text-slate-900 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
+                    ? 'bg-white/[0.12] text-[#F5F5F7]'
+                    : 'text-zinc-400 hover:text-zinc-200'
                 }`}
               >
                 Windows
@@ -185,10 +161,10 @@ export function ClaudeMcpView({
               <button
                 type="button"
                 onClick={() => setOsTarget('macos_linux')}
-                className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${
+                className={`rounded-lg px-3 py-1 text-xs font-medium transition-colors ${
                   osTarget === 'macos_linux'
-                    ? 'bg-white text-slate-900 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
+                    ? 'bg-white/[0.12] text-[#F5F5F7]'
+                    : 'text-zinc-400 hover:text-zinc-200'
                 }`}
               >
                 macOS / Linux
@@ -197,12 +173,53 @@ export function ClaudeMcpView({
 
             <button
               type="button"
+              onClick={() =>
+                onDownloadFile(current.filename, current.content, current.mime)
+              }
+              className="inline-flex items-center gap-1.5 rounded-full bg-[#0A84FF] px-4 py-2 text-xs font-semibold text-white hover:brightness-110 whitespace-nowrap"
+            >
+              <Download className="h-3.5 w-3.5" aria-hidden="true" />
+              {current.filename} İndir
+            </button>
+
+            {onNavigate && (
+              <button
+                type="button"
+                onClick={() => onNavigate('denetim')}
+                className="inline-flex items-center gap-1 rounded-full border border-white/[0.08] bg-[#1C1C20] px-3.5 py-2 text-xs font-medium text-zinc-200 hover:bg-white/[0.08] whitespace-nowrap"
+              >
+                <span>Sistem Korumaları</span>
+                <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Collapsible Code & File Viewer */}
+        <div className="rounded-xl border border-white/[0.06] bg-[#0E0E11]">
+          <div className="flex items-center justify-between px-4 py-3">
+            <button
+              type="button"
+              onClick={() => setShowFilesDrawer((v) => !v)}
+              className="flex items-center gap-2 text-xs font-medium text-zinc-300 hover:text-white"
+            >
+              <ChevronDown
+                className={`h-4 w-4 text-zinc-500 transition-transform ${
+                  showFilesDrawer ? 'rotate-180' : ''
+                }`}
+                aria-hidden="true"
+              />
+              <span>Paketteki Dosyaları İncele &amp; Kopyala</span>
+            </button>
+
+            <button
+              type="button"
               onClick={handleCopy}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:border-slate-300 hover:bg-slate-50"
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-zinc-400 hover:text-white"
             >
               {copied ? (
                 <>
-                  <Check className="h-3.5 w-3.5 text-emerald-600" aria-hidden="true" />
+                  <Check className="h-3.5 w-3.5 text-[#30D158]" aria-hidden="true" />
                   Kopyalandı
                 </>
               ) : (
@@ -212,102 +229,50 @@ export function ClaudeMcpView({
                 </>
               )}
             </button>
+          </div>
 
-            <button
-              type="button"
-              onClick={() =>
-                onDownloadFile(current.filename, current.content, current.mime)
-              }
-              className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700"
-            >
-              <Download className="h-3.5 w-3.5" aria-hidden="true" />
-              {current.filename} İndir
-            </button>
-          </div>
-        </div>
-
-        {/* Clean 3-column flow strip */}
-        <div className="grid divide-y divide-slate-200 rounded-lg border border-slate-200 bg-slate-50 md:grid-cols-3 md:divide-y-0 md:divide-x">
-          <div className="p-4">
-            <div className="text-xs font-semibold text-blue-600">1. Yapay Zeka Kuralları</div>
-            <div className="mt-1 text-xs font-bold text-slate-900">
-              Standart Klasör &amp; Sahne Yapısı
-            </div>
-            <div className="mt-0.5 text-xs text-slate-600">
-              Promptlar ve referans görseller her seferinde doğru klasöre yerleşir.
-            </div>
-          </div>
-          <div className="p-4">
-            <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-700">
-              <span>2. Otomatik Bulut Köprüsü</span>
-              <ArrowRight className="h-3 w-3" aria-hidden="true" />
-            </div>
-            <div className="mt-1 text-xs font-bold text-slate-900">
-              Doğrudan Colab &amp; Video Motoru Kontrolü
-            </div>
-            <div className="mt-0.5 text-xs text-slate-600">
-              Tarayıcı botları olmadan güvenli ve kararlı uzaktan yönetim.
-            </div>
-          </div>
-          <div className="p-4">
-            <div className="text-xs font-semibold text-amber-700">3. Sıfır Ek Maliyet</div>
-            <div className="mt-1 text-xs font-bold text-slate-900">
-              Otomatik Sıralı Video İndirme
-            </div>
-            <div className="mt-0.5 text-xs text-slate-600">
-              Üretilen tüm sahneler tek kurulumla doğrudan proje klasörünüze gelir.
-            </div>
-          </div>
-        </div>
-
-        <div className="border-b border-slate-200 pb-4">
-          <div
-            role="tablist"
-            aria-label="Otomasyon paketi dosyaları"
-            className="flex items-center gap-1 overflow-x-auto rounded-lg border border-slate-200 bg-slate-100 p-1"
-          >
-            {(Object.keys(docs) as DocTab[]).map((key) => (
-              <button
-                key={key}
-                type="button"
-                role="tab"
-                aria-selected={activeDoc === key}
-                onClick={() => setActiveDoc(key)}
-                className={`rounded-md px-3 py-1.5 text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
-                  activeDoc === key
-                    ? 'bg-white text-slate-900 font-semibold shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
+          {showFilesDrawer && (
+            <div className="border-t border-white/[0.06] p-4 space-y-3">
+              <div
+                role="tablist"
+                aria-label="Otomasyon paketi dosyaları"
+                className="flex items-center gap-1 overflow-x-auto rounded-lg border border-white/[0.06] bg-[#141417] p-1"
               >
-                {docs[key].label}
-              </button>
-            ))}
-          </div>
-        </div>
+                {(Object.keys(docs) as DocTab[]).map((key) => (
+                  <button
+                    key={key}
+                    type="button"
+                    role="tab"
+                    aria-selected={activeDoc === key}
+                    onClick={() => setActiveDoc(key)}
+                    className={`rounded-md px-3 py-1 text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
+                      activeDoc === key
+                        ? 'bg-white/[0.12] text-white'
+                        : 'text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    {docs[key].label}
+                  </button>
+                ))}
+              </div>
 
-        <div className="space-y-3">
-          <div className="flex items-center justify-between gap-4 text-xs text-slate-600">
-            <span>{current.description}</span>
-            <span className="font-mono text-slate-500 tabular-nums shrink-0">
-              {current.content.split('\n').length} satır
-            </span>
-          </div>
-
-          <pre className="max-h-[420px] overflow-auto rounded-xl border border-slate-200 bg-slate-50 p-5 font-mono text-xs leading-relaxed text-slate-800">
-            {current.content}
-          </pre>
+              <pre className="max-h-80 overflow-auto rounded-xl border border-white/[0.06] bg-[#141417] p-4 font-mono text-xs leading-relaxed text-zinc-300">
+                {current.content}
+              </pre>
+            </div>
+          )}
         </div>
       </section>
 
-      <section className="rounded-xl border border-slate-200 bg-white p-6">
+      {/* Revisions Section */}
+      <section className="rounded-2xl border border-white/[0.08] bg-[#141417] p-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h2 className="text-base font-bold text-slate-900">
+            <h2 className="text-base font-semibold text-[#F5F5F7]">
               Video Revizyon Notları ({allRevisions.length})
             </h2>
-            <p className="mt-0.5 text-xs text-slate-600">
-              Stüdyo ekranında &ldquo;Yeniden Düzenle&rdquo; ile eklediğiniz tüm sahne düzeltme
-              talepleri burada listelenir.
+            <p className="mt-0.5 text-xs text-zinc-500">
+              Stüdyo ekranında eklenen sahne düzeltme talepleri burada toplanır.
             </p>
           </div>
           {allRevisions.length > 0 && (
@@ -324,7 +289,7 @@ export function ClaudeMcpView({
                   'application/json'
                 )
               }
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:border-blue-300"
+              className="inline-flex items-center gap-1.5 rounded-full border border-white/[0.08] bg-[#1C1C20] px-3.5 py-1.5 text-xs font-medium text-zinc-200 hover:bg-white/[0.08]"
             >
               <Download className="h-3.5 w-3.5" aria-hidden="true" />
               Notları İndir
@@ -333,22 +298,18 @@ export function ClaudeMcpView({
         </div>
 
         {allRevisions.length === 0 ? (
-          <p className="mt-4 text-xs text-slate-500">
-            Henüz bir revizyon talebi oluşturulmadı. Stüdyo ekranındaki render önizlemesinden
-            beğenmediğiniz sahnelere not ekleyebilirsiniz.
+          <p className="mt-3 text-xs text-zinc-500">
+            Henüz bir revizyon talebi oluşturulmadı.
           </p>
         ) : (
-          <div className="mt-4 divide-y divide-slate-200 rounded-lg border border-slate-200 bg-slate-50">
+          <div className="mt-4 divide-y divide-white/[0.06] rounded-xl border border-white/[0.06] bg-[#0E0E11]">
             {allRevisions.map(({ outputTitle, note }) => (
-              <div key={note.id} className="space-y-1.5 p-4 text-xs">
+              <div key={note.id} className="space-y-1 p-4 text-xs">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="font-semibold text-slate-900">{outputTitle}</span>
-                  <span className="font-medium text-blue-600">
-                    {note.status === 'claude_yetkilendirildi' ? 'Claude’a İletildi' : note.status} ·{' '}
-                    {note.severity}
-                  </span>
+                  <span className="font-semibold text-[#F5F5F7]">{outputTitle}</span>
+                  <span className="font-medium text-[#0A84FF]">{note.severity}</span>
                 </div>
-                <p className="text-slate-700">{note.note}</p>
+                <p className="text-zinc-300">{note.note}</p>
               </div>
             ))}
           </div>

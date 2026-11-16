@@ -16,8 +16,17 @@ import { createMacTrialZipBuffer } from './src/utils/macPackage';
 dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PORT = Number(process.env.PORT || 3000);
 const isProduction = process.env.NODE_ENV === 'production';
+const portArgIdx = process.argv.indexOf('--port');
+const cliPort =
+  portArgIdx !== -1 && process.argv[portArgIdx + 1]
+    ? Number(process.argv[portArgIdx + 1])
+    : NaN;
+const PORT = Number(
+  (Number.isFinite(cliPort) && cliPort > 0 ? cliPort : null) ??
+    (isProduction ? process.env.PORT : null) ??
+    3000
+);
 
 const VALID_TELEMETRY_STAGES: TelemetryStage[] = [
   'idle',
@@ -456,7 +465,10 @@ async function startServer() {
   if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR === 'true' ? false : { server: httpServer },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);

@@ -5,6 +5,7 @@ import {
   GpuProfileSpec,
   GuardrailCheckStep,
   GuardrailEvaluationResult,
+  MediaRole,
   ProjectAssetFile,
 } from '../types/automation';
 
@@ -40,6 +41,11 @@ const STACK_FOLDER_MAP: Record<AssetKind, string> = {
 
 export function inferAssetKind(relativePath: string, fileName: string, mimeType: string): AssetKind {
   const normalized = `${relativePath}/${fileName}`.toLowerCase();
+  const lowerName = fileName.toLowerCase();
+
+  if (/\.(blend|blend1)$/i.test(lowerName)) {
+    return 'blender_graybox';
+  }
 
   if (
     normalized.includes('comfy') ||
@@ -69,8 +75,8 @@ export function inferAssetKind(relativePath: string, fileName: string, mimeType:
 
   if (
     normalized.includes('prompt') ||
-    fileName.toLowerCase().endsWith('.txt') ||
-    fileName.toLowerCase().endsWith('.md')
+    lowerName.endsWith('.txt') ||
+    lowerName.endsWith('.md')
   ) {
     return 'prompts';
   }
@@ -78,15 +84,16 @@ export function inferAssetKind(relativePath: string, fileName: string, mimeType:
   if (
     normalized.includes('setting') ||
     normalized.includes('config') ||
+    normalized.includes('brief') ||
     normalized.includes('finetune') ||
     normalized.includes('lora') ||
     normalized.includes('detail') ||
     normalized.includes('ayar') ||
-    fileName.toLowerCase().endsWith('.yaml') ||
-    fileName.toLowerCase().endsWith('.yml') ||
-    fileName.toLowerCase().endsWith('.toml') ||
-    fileName.toLowerCase().endsWith('.json') ||
-    fileName.toLowerCase().endsWith('.safetensors')
+    lowerName.endsWith('.yaml') ||
+    lowerName.endsWith('.yml') ||
+    lowerName.endsWith('.toml') ||
+    lowerName.endsWith('.json') ||
+    lowerName.endsWith('.safetensors')
   ) {
     return 'settings';
   }
@@ -94,9 +101,52 @@ export function inferAssetKind(relativePath: string, fileName: string, mimeType:
   if (
     mimeType.startsWith('image/') ||
     mimeType.startsWith('video/') ||
-    /\.(png|jpe?g|webp|exr|mp4|mov|webm|mkv)$/i.test(fileName)
+    /\.(png|jpe?g|webp|exr|mp4|mov|webm|mkv)$/i.test(lowerName)
   ) {
     return 'reference_media';
+  }
+
+  return 'other';
+}
+
+export function inferMediaRole(
+  relativePath: string,
+  fileName: string,
+  kind: AssetKind
+): MediaRole {
+  const normalized = `${relativePath}/${fileName}`.toLowerCase();
+  const lowerName = fileName.toLowerCase();
+
+  if (/\.(blend|blend1)$/i.test(lowerName)) {
+    return 'blender_scene';
+  }
+
+  if (
+    normalized.includes('first_frame') ||
+    normalized.includes('ilk_kare') ||
+    normalized.includes('start_frame') ||
+    normalized.includes('keyframe_start') ||
+    /(^|[_/-])frame_?0?1\./i.test(lowerName)
+  ) {
+    return 'first_frame';
+  }
+
+  if (
+    normalized.includes('last_frame') ||
+    normalized.includes('son_kare') ||
+    normalized.includes('end_frame') ||
+    normalized.includes('keyframe_end') ||
+    normalized.includes('final_frame')
+  ) {
+    return 'last_frame';
+  }
+
+  if (kind === 'blender_graybox') {
+    return 'blender_rendered';
+  }
+
+  if (kind === 'reference_media') {
+    return 'style_ref';
   }
 
   return 'other';
@@ -128,6 +178,7 @@ export function classifyProjectFiles(
 ): ProjectAssetFile[] {
   return files.map((file, idx) => {
     const kind = inferAssetKind(file.relativePath, file.name, file.mimeType);
+    const mediaRole = inferMediaRole(file.relativePath, file.name, kind);
     return {
       id: `asset-${idx}-${file.name.replace(/[^a-zA-Z0-9_-]/g, '_')}`,
       name: file.name,
@@ -135,6 +186,7 @@ export function classifyProjectFiles(
       sizeBytes: file.sizeBytes,
       mimeType: file.mimeType || 'application/octet-stream',
       kind,
+      mediaRole,
       targetColabPath: buildTargetColabPath(workspaceRoot, kind, file.name),
       previewText: file.previewText,
       objectUrl: file.objectUrl,

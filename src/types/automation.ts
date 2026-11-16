@@ -51,6 +51,32 @@ export type AssetKind =
   | 'blender_graybox'
   | 'other';
 
+export type MediaRole =
+  | 'first_frame'
+  | 'last_frame'
+  | 'blender_scene'
+  | 'blender_rendered'
+  | 'style_ref'
+  | 'other';
+
+export type DeliveryPresetId = 'etsy_4_3' | 'etsy_1_1' | 'social_9_16' | 'cinema_16_9';
+
+export type BlenderRenderEngine = 'CYCLES' | 'BLENDER_EEVEE_NEXT';
+export type BlenderDeviceType = 'OPTIX' | 'CUDA';
+export type BlenderOutputMode = 'keyframes_only' | 'full_animation' | 'clay_depth_pass';
+
+export interface BlenderRenderConfig {
+  enabled: boolean;
+  autoDetectUnrenderedBlend: boolean;
+  blenderVersion: string;
+  engine: BlenderRenderEngine;
+  device: BlenderDeviceType;
+  samples: number;
+  outputMode: BlenderOutputMode;
+  frameStart: number;
+  frameEnd: number;
+}
+
 export interface ProjectAssetFile {
   id: string;
   name: string;
@@ -58,6 +84,7 @@ export interface ProjectAssetFile {
   sizeBytes: number;
   mimeType: string;
   kind: AssetKind;
+  mediaRole?: MediaRole;
   targetColabPath: string;
   previewText?: string;
   objectUrl?: string;
@@ -96,6 +123,8 @@ export interface ColabProject {
   description: string;
   updatedAt: string;
   targetGpuPolicy: '80GB_ONLY' | '80GB_OR_40GB';
+  deliveryPreset?: DeliveryPresetId;
+  sourceBundleFormat?: 'claude_etsy_bundle' | 'manual';
   assets: ProjectAssetFile[];
   outputs: OutputRenderItem[];
 }
@@ -115,6 +144,12 @@ export interface BatchQueueItem {
   status: BatchJobStatus;
   addedAt: string;
   estimatedRenderMin: number;
+  actualRenderMin?: number | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  gpuTierUsed?: '80GB' | '40GB';
+  deliveryPreset?: DeliveryPresetId;
+  requiresBlenderRender?: boolean;
 }
 
 export type BatchScheduleMode = 'time' | 'low_load' | 'time_and_low_load';
@@ -216,6 +251,7 @@ export interface AutomationConfig {
   comfyui: ComfyUiConfig;
   modelInstaller: ModelInstallerConfig;
   batchSchedule: BatchScheduleConfig;
+  blenderRender: BlenderRenderConfig;
 }
 
 export interface GuardrailCheckStep {

@@ -88,7 +88,7 @@ export function ProjectQuickPreviewModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-[2px]"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-[2px]"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -97,18 +97,18 @@ export function ProjectQuickPreviewModal({
         role="dialog"
         aria-modal="true"
         aria-labelledby="quick-preview-modal-title"
-        className="w-full max-w-3xl overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl"
+        className="w-full max-w-3xl overflow-hidden rounded-lg border border-[#2D3444] bg-[#13161D] shadow-2xl"
       >
-        <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-6 py-4">
+        <div className="flex items-start justify-between gap-4 border-b border-[#252A36] px-6 py-4">
           <div className="min-w-0">
             <h2
               id="quick-preview-modal-title"
-              className="truncate text-base font-bold tracking-tight text-slate-900"
+              className="truncate text-base font-bold tracking-tight text-slate-100"
             >
               {project.name}
             </h2>
-            <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-slate-500 tabular-nums">
-              <span className="font-semibold text-slate-700">
+            <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-slate-400 tabular-nums">
+              <span className="font-semibold text-slate-200">
                 {summary.statusLabel} %{summary.progressPct}
               </span>
               <span aria-hidden="true">·</span>
@@ -126,7 +126,7 @@ export function ProjectQuickPreviewModal({
             type="button"
             aria-label="Hızlı izleme penceresini kapat"
             onClick={onClose}
-            className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+            className="rounded-md p-1.5 text-slate-400 transition-colors hover:bg-[#1E2432] hover:text-white"
           >
             <X className="h-4 w-4" aria-hidden="true" />
           </button>
@@ -138,7 +138,7 @@ export function ProjectQuickPreviewModal({
             <div
               role="tablist"
               aria-label="Hızlı izleme katmanları"
-              className="inline-flex rounded-lg bg-slate-100 p-1"
+              className="inline-flex rounded-md border border-[#252A36] bg-[#0B0D11] p-1"
             >
               {layerTabs.map((tab) => {
                 const isSelected = activeLayer === tab.key;
@@ -149,10 +149,10 @@ export function ProjectQuickPreviewModal({
                     role="tab"
                     aria-selected={isSelected}
                     onClick={() => setActiveLayer(tab.key)}
-                    className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap ${
+                    className={`rounded px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap ${
                       isSelected
-                        ? 'bg-white text-slate-900 shadow-xs font-semibold'
-                        : 'text-slate-600 hover:text-slate-900'
+                        ? 'bg-[#1E2432] text-white font-semibold'
+                        : 'text-slate-400 hover:text-slate-200'
                     }`}
                   >
                     {tab.label}
@@ -161,13 +161,13 @@ export function ProjectQuickPreviewModal({
               })}
             </div>
 
-            <span className="text-xs text-slate-500">
+            <span className="text-xs text-slate-400">
               {summary.stageDetail}
             </span>
           </div>
 
           {/* 16:9 Stage */}
-          <div className="relative aspect-video w-full overflow-hidden rounded-lg bg-slate-900">
+          <div className="relative aspect-video w-full overflow-hidden rounded-md border border-[#252A36] bg-[#07090D]">
             {showVideoPlayer ? (
               <video
                 src={latestOutput.objectUrl}
@@ -188,7 +188,7 @@ export function ProjectQuickPreviewModal({
                 className="h-full w-full object-cover"
               />
             ) : (
-              <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-slate-300">
+              <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-slate-400">
                 <Film className="h-8 w-8" aria-hidden="true" />
                 <span className="text-xs font-medium">{project.name}</span>
               </div>
@@ -196,12 +196,12 @@ export function ProjectQuickPreviewModal({
           </div>
 
           {/* Description & Prompt Snippet */}
-          <div className="grid grid-cols-1 gap-4 border-t border-slate-100 pt-4 md:grid-cols-2">
+          <div className="grid grid-cols-1 gap-4 border-t border-[#252A36] pt-4 md:grid-cols-2">
             <div className="space-y-1">
               <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
                 Sahne Özeti
               </p>
-              <p className="text-xs leading-relaxed text-slate-700">
+              <p className="text-xs leading-relaxed text-slate-300">
                 {project.description}
               </p>
             </div>
@@ -210,8 +210,8 @@ export function ProjectQuickPreviewModal({
               <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
                 Aktif Sahne Tarifi ({promptAsset?.name ?? 'master_prompt.txt'})
               </p>
-              <div className="rounded-lg bg-slate-50 px-3 py-2">
-                <p className="line-clamp-3 font-mono text-[11px] leading-relaxed text-slate-700">
+              <div className="rounded-md border border-[#252A36] bg-[#0B0D11] px-3 py-2">
+                <p className="line-clamp-3 font-mono text-[11px] leading-relaxed text-slate-200">
                   {promptAsset?.previewText?.trim() ||
                     'Henüz sahne tarifi girilmemiş. Detayları Düzenle veya Stüdyo üzerinden ekleyebilirsiniz.'}
                 </p>
@@ -220,16 +220,16 @@ export function ProjectQuickPreviewModal({
           </div>
 
           {/* Modal Footer */}
-          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-4">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#252A36] pt-4">
             <button
               type="button"
               onClick={() => {
                 onStartProject(project.id);
                 onClose();
               }}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-50"
+              className="inline-flex items-center gap-1.5 rounded-md border border-[#2D3444] bg-[#181C26] px-3.5 py-2 text-xs font-semibold text-slate-200 hover:bg-[#1E2432]"
             >
-              <Play className="h-3.5 w-3.5 text-blue-600" aria-hidden="true" />
+              <Play className="h-3.5 w-3.5 text-blue-400" aria-hidden="true" />
               <span>
                 {summary.stageKey === 'isleniyor' ? 'Üretim Konsoluna Git' : 'Üretimi Başlat'}
               </span>
@@ -239,7 +239,7 @@ export function ProjectQuickPreviewModal({
               <button
                 type="button"
                 onClick={onClose}
-                className="rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                className="rounded-md border border-[#2D3444] bg-[#181C26] px-3.5 py-2 text-xs font-medium text-slate-200 hover:bg-[#1E2432]"
               >
                 Kapat
               </button>
@@ -249,7 +249,7 @@ export function ProjectQuickPreviewModal({
                   onClose();
                   onOpenInStudio(project.id);
                 }}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-4 py-2 text-xs font-semibold text-white hover:bg-slate-800"
+                className="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-500"
               >
                 <span>Stüdyoda Aç</span>
                 <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />

@@ -1,32 +1,42 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
+  Archive,
+  Check,
+  CheckCircle2,
+  ChevronDown,
+  CloudUpload,
+  Copy,
+  Cpu,
+  Download,
+  ExternalLink,
+  Layers,
+  Loader2,
   Play,
+  Send,
   ShieldAlert,
   ShieldCheck,
-  Cpu,
-  CheckCircle2,
+  SlidersHorizontal,
   XCircle,
-  Loader2,
-  Send,
-  CloudUpload,
-  Archive,
-  ExternalLink,
-  AlertTriangle,
-  Copy,
-  Check,
-  Download,
-  ChevronDown,
 } from 'lucide-react';
 import {
   AuditFinding,
   AutomationConfig,
   BatchQueueItem,
   ColabProject,
+  DeliveryPresetId,
   HfVerifyResult,
   TelemetrySnapshot,
 } from '../types/automation';
+import type { BridgeRuntimePreset } from '../hooks/useColabTelemetry';
 import { GPU_SIMULATION_PRESETS } from '../data/auditFindings';
 import { evaluateRuntimeGuardrail } from '../utils/guardrailEngine';
+import { inspectProjectPipelineReadiness } from '../utils/claudeBundle';
+import {
+  evaluateGpuHealthCheck,
+  type GpuHealthHistoryEntry,
+  type HealthCheckTrigger,
+} from '../utils/gpuHealthCheck';
 import {
   generateBatchQueueJson,
   generateColabNotebookJson,
@@ -43,6 +53,7 @@ import {
 import { GoogleSignInButton } from './GoogleSignInButton';
 import { BatchQueuePanel } from './BatchQueuePanel';
 import { TelemetryBridgePanel } from './TelemetryBridgePanel';
+import { GpuHealthCheckPanel } from './GpuHealthCheckPanel';
 
 interface ColabConsoleViewProps {
   project: ColabProject;
@@ -56,7 +67,12 @@ interface ColabConsoleViewProps {
   isSigningIn: boolean;
   onConnectDrive: () => Promise<void>;
   onDownloadFile: (filename: string, content: string | Blob, mime: string) => void;
-  onAddBatchJob: (projectId: string, sceneLabel: string) => void;
+  onAddBatchJob: (
+    projectId: string,
+    sceneLabel: string,
+    deliveryPreset?: DeliveryPresetId
+  ) => void;
+  onAddEtsyAndSocialPair?: (projectId: string) => void;
   onReorderBatchJob: (index: number, direction: 'up' | 'down') => void;
   onRemoveBatchJob: (jobId: string) => void;
   onClearCompletedBatchJobs: () => void;
@@ -65,52 +81,47 @@ interface ColabConsoleViewProps {
   wsStatus: 'connecting' | 'connected' | 'disconnected';
   ingestToken: string;
   pingSending: boolean;
-  onSendBridgePing: () => Promise<void>;
+  onSendBridgePing: (preset?: BridgeRuntimePreset) => Promise<void>;
   onResetTelemetry: () => Promise<void>;
+  onSelectProject: (projectId: string) => void;
+  onUpdateProjectGpuPolicy: (
+    projectId: string,
+    policy: ColabProject['targetGpuPolicy']
+  ) => void;
 }
-
-const MACRO_PIPELINE_STEPS = [
-  {
-    step: '01',
-    title: 'Donanım Kontrolü',
-    est: '~5 sn',
-    detail: 'Doğru ekran kartı (A100) ve yüksek bellek kontrol edilir; uyumsuzsa kapatılır.',
-  },
-  {
-    step: '02',
-    title: 'Motor Kurulumu',
-    est: '~25 sn',
-    detail: 'Video üretim motoru ve hızlandırıcı eklentiler güvenli şekilde hazırlanır.',
-  },
-  {
-    step: '03',
-    title: 'Model İndirme',
-    est: '~1-8 dk',
-    detail: 'MiniMax H3 video modelleri HF_HUB_ENABLE_HF_TRANSFER=1 yüksek hızlı transferiyle indirilir.',
-  },
-  {
-    step: '04',
-    title: 'Sahne Hazırlığı',
-    est: '~30 sn',
-    detail: '3D graybox, stil görselleri ve sahne tarifiniz sıraya alınır.',
-  },
-  {
-    step: '05',
-    title: 'Video Üretimi',
-    est: 'Değişken',
-    detail: 'Bellek taşması korumasıyla tüm sahneler art arda MP4’e dönüştürülür.',
-  },
-  {
-    step: '06',
-    title: 'Teslim & Kapanış',
-    est: '~15 sn',
-    detail: 'Videolar bilgisayarınıza alınır, Drive açıksa yedeklenir ve oturum kapanır.',
-  },
-];
 
 interface ParsedNotebookCell {
   cell_type: string;
   source: string[] | string;
+}
+
+function AppleToggle({
+  checked,
+  onChange,
+  label,
+}: {
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={() => onChange(!checked)}
+      className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-[#0A84FF]/60 ${
+        checked ? 'bg-[#30D158]' : 'bg-zinc-700'
+      }`}
+    >
+      <span
+        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition duration-200 ${
+          checked ? 'translate-x-5' : 'translate-x-0'
+        }`}
+      />
+    </button>
+  );
 }
 
 export function ColabConsoleView({
@@ -126,6 +137,7 @@ export function ColabConsoleView({
   onConnectDrive,
   onDownloadFile,
   onAddBatchJob,
+  onAddEtsyAndSocialPair,
   onReorderBatchJob,
   onRemoveBatchJob,
   onClearCompletedBatchJobs,
@@ -136,6 +148,8 @@ export function ColabConsoleView({
   pingSending,
   onSendBridgePing,
   onResetTelemetry,
+  onSelectProject,
+  onUpdateProjectGpuPolicy,
 }: ColabConsoleViewProps) {
   const [selectedGpuId, setSelectedGpuId] = useState<string>(GPU_SIMULATION_PRESETS[0].id);
   const [simulateHfOk, setSimulateHfOk] = useState<boolean>(true);
@@ -152,10 +166,14 @@ export function ColabConsoleView({
   const [runCounter, setRunCounter] = useState<number>(1);
   const [zipLoading, setZipLoading] = useState(false);
   const [copiedNb, setCopiedNb] = useState(false);
-  const [activeMacroStep, setActiveMacroStep] = useState<string>('01');
 
-  // Progressive disclosure toggles so customers don't face code walls by default
-  const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
+  // GPU Health Check state
+  const [healthHistory, setHealthHistory] = useState<GpuHealthHistoryEntry[]>([]);
+  const [lastCheckedAt, setLastCheckedAt] = useState<string | null>(null);
+  const prevHealthSnapshotRef = useRef<string>('');
+
+  // Single unified advanced disclosure (keeps primary Üretim view ultra calm)
+  const [showAdvancedDrawer, setShowAdvancedDrawer] = useState(false);
   const [showNotebookCode, setShowNotebookCode] = useState(false);
   const [notebookInspectMode, setNotebookInspectMode] = useState<'cells' | 'raw'>('cells');
   const [selectedCellIndex, setSelectedCellIndex] = useState<number>(0);
@@ -180,6 +198,76 @@ export function ColabConsoleView({
     () => evaluateRuntimeGuardrail(selectedGpu, config, project.assets, simulateHfOk),
     [selectedGpu, config, project.assets, simulateHfOk, runCounter]
   );
+
+  const readiness = useMemo(
+    () => inspectProjectPipelineReadiness(project, config.blenderRender),
+    [project, config.blenderRender]
+  );
+
+  const healthResult = useMemo(
+    () => evaluateGpuHealthCheck(project, telemetry, config),
+    [project, telemetry, config]
+  );
+
+  const recordHealthCheckEntry = useCallback(
+    (trigger: HealthCheckTrigger) => {
+      const checkedAt = new Date().toLocaleTimeString('tr-TR', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+      setLastCheckedAt(checkedAt);
+      const entry: GpuHealthHistoryEntry = {
+        id: `hc-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+        checkedAt,
+        trigger,
+        projectName: project.name,
+        gpuName: telemetry.gpuName ?? 'Runtime Bağlı Değil',
+        allocatedVramGb: telemetry.vramTotalGb,
+        requiredPolicy: project.targetGpuPolicy,
+        status: healthResult.status,
+        headline: healthResult.headline,
+      };
+      setHealthHistory((prev) => [entry, ...prev].slice(0, 10));
+    },
+    [
+      project.name,
+      project.targetGpuPolicy,
+      telemetry.gpuName,
+      telemetry.vramTotalGb,
+      healthResult.status,
+      healthResult.headline,
+    ]
+  );
+
+  useEffect(() => {
+    if (!healthResult.isConnected) {
+      prevHealthSnapshotRef.current = `disconnected|${project.id}|${project.targetGpuPolicy}`;
+      return;
+    }
+
+    const runtimeKey = `${telemetry.sessionId ?? ''}|${telemetry.vramTotalGb ?? ''}|${telemetry.systemRamTotalGb ?? ''}|${telemetry.lastUpdatedAt ?? ''}`;
+    const fullKey = `${runtimeKey}|${project.id}|${project.targetGpuPolicy}|${config.requireHighRam}|${config.minHighRamGb}`;
+
+    if (prevHealthSnapshotRef.current === fullKey) {
+      return;
+    }
+
+    const wasRuntimeSame = prevHealthSnapshotRef.current.startsWith(runtimeKey);
+    prevHealthSnapshotRef.current = fullKey;
+    recordHealthCheckEntry(wasRuntimeSame ? 'project_switch' : 'auto_connect');
+  }, [
+    healthResult.isConnected,
+    telemetry.sessionId,
+    telemetry.vramTotalGb,
+    telemetry.systemRamTotalGb,
+    telemetry.lastUpdatedAt,
+    project.id,
+    project.targetGpuPolicy,
+    config.requireHighRam,
+    config.minHighRamGb,
+    recordHealthCheckEntry,
+  ]);
 
   const telemetryOrigin = typeof window !== 'undefined' ? window.location.origin : '';
 
@@ -380,7 +468,7 @@ export function ColabConsoleView({
     if (!res) return null;
     if (res.ok) {
       return (
-        <div className="flex items-center gap-1.5 text-xs text-emerald-700">
+        <div className="flex items-center gap-1.5 text-xs text-[#30D158]">
           <CheckCircle2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
           <span>
             Doğrulandı ({res.fileCount ?? 0} dosya ·{' '}
@@ -393,7 +481,7 @@ export function ColabConsoleView({
       );
     }
     return (
-      <div className="flex items-center gap-1.5 text-xs text-rose-700">
+      <div className="flex items-center gap-1.5 text-xs text-[#FF453A]">
         <XCircle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
         <span>{res.error || `Hata (${res.status})`}</span>
       </div>
@@ -401,22 +489,17 @@ export function ColabConsoleView({
   }
 
   return (
-    <div className="space-y-6">
-      {/* Studio Command & Clean 6-Stage Visual Timeline */}
-      <section className="rounded-xl border border-slate-200 bg-white p-6">
+    <div className="space-y-6 text-[#F5F5F7]">
+      {/* 1. Calm Launch Card */}
+      <section className="rounded-2xl border border-white/[0.08] bg-[#141417] p-6">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-              <span className="font-semibold text-blue-600">Otomatik Bulut Üretimi</span>
-              <span aria-hidden="true">·</span>
-              <span>Aktif Proje: {project.name}</span>
-            </div>
-            <h1 className="mt-1 text-xl font-bold text-slate-900">
-              Üretim Başlatma, Sıra Yönetimi &amp; Donanım Kontrolü
+            <div className="text-xs font-medium text-[#0A84FF]">Bulut Üretim Merkezi</div>
+            <h1 className="mt-1 text-2xl font-semibold tracking-tight text-[#F5F5F7]">
+              {project.name}
             </h1>
-            <p className="mt-1 text-xs leading-relaxed text-slate-600">
-              Oturum her zaman yüksek bellekli A100 ekran kartı ister. Uygun kart
-              bulunamazsa kredinizi korumak için oturumu otomatik olarak kapatır.
+            <p className="mt-1 text-sm text-zinc-400">
+              Drive’a aktarın veya çalışma paketini indirip Google Colab A100 üzerinde çalıştırın.
             </p>
           </div>
 
@@ -432,7 +515,7 @@ export function ColabConsoleView({
                 type="button"
                 onClick={handleStartDriveSync}
                 disabled={syncStage === 'scanning' || syncStage === 'uploading'}
-                className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap"
+                className="inline-flex items-center gap-2 rounded-full bg-[#0A84FF] px-5 py-2 text-xs font-semibold text-white transition-colors hover:brightness-110 disabled:opacity-50 whitespace-nowrap"
               >
                 {syncStage === 'scanning' || syncStage === 'uploading' ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
@@ -447,7 +530,7 @@ export function ColabConsoleView({
               type="button"
               onClick={handleDownloadZip}
               disabled={zipLoading}
-              className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 whitespace-nowrap"
+              className="inline-flex items-center gap-2 rounded-full border border-white/[0.08] bg-[#1C1C20] px-4 py-2 text-xs font-medium text-zinc-200 transition-colors hover:bg-white/[0.08] whitespace-nowrap"
             >
               <Archive className="h-3.5 w-3.5" aria-hidden="true" />
               {zipLoading ? 'Paketleniyor...' : 'Tam Paket (.zip)'}
@@ -456,71 +539,113 @@ export function ColabConsoleView({
         </div>
 
         {syncStage === 'uploading' && syncProgress && (
-          <div className="mt-4 rounded-lg border border-blue-200 bg-blue-50 px-4 py-2.5 text-xs text-blue-900">
+          <div className="mt-4 rounded-xl border border-[#0A84FF]/30 bg-[#0A84FF]/10 px-4 py-2.5 text-xs text-blue-200">
             Yükleniyor: {syncProgress.label} ({syncProgress.completed}/{syncProgress.total})
           </div>
         )}
         {syncError && (
-          <div className="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-2.5 text-xs text-rose-800">
+          <div className="mt-4 rounded-xl border border-[#FF453A]/30 bg-[#FF453A]/10 px-4 py-2.5 text-xs text-rose-200">
             {syncError}
           </div>
         )}
         {syncResult && (
-          <div className="mt-4 flex flex-col gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4 sm:flex-row sm:items-center sm:justify-between">
-            <div className="text-xs text-emerald-900">
+          <div className="mt-4 flex flex-col gap-3 rounded-xl border border-[#30D158]/30 bg-[#30D158]/10 p-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="text-xs text-emerald-100">
               <strong>{syncResult.uploadedCount} dosya</strong> aktarıldı. Çalıştırma
-              defteriniz yüksek bellekli A100 ayarıyla hazır.
+              defteriniz A100 ayarıyla hazır.
             </div>
             <a
               href={syncResult.colabLaunchUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-700 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-800 whitespace-nowrap shrink-0"
+              className="inline-flex items-center gap-1.5 rounded-full bg-[#30D158] px-4 py-2 text-xs font-semibold text-black hover:brightness-110 whitespace-nowrap shrink-0"
             >
+              <span className="sr-only">Colab açılış bağlantısı</span>
               Colab A100 Oturumunu Aç
               <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
             </a>
           </div>
         )}
 
-        {/* Interactive 6-Stage Plain-Language Timeline */}
-        <div className="mt-6 grid gap-2.5 border-t border-slate-200 pt-5 sm:grid-cols-2 lg:grid-cols-6">
-          {MACRO_PIPELINE_STEPS.map((m) => {
-            const active = activeMacroStep === m.step;
-            return (
-              <button
-                key={m.step}
-                type="button"
-                onClick={() => setActiveMacroStep(m.step)}
-                className={`rounded-lg border p-3 text-left transition-colors duration-150 space-y-1 ${
-                  active
-                    ? 'border-blue-600 bg-blue-50/50'
-                    : 'border-slate-200 bg-slate-50 hover:border-slate-300 hover:bg-white'
-                }`}
-              >
-                <div className="flex items-center justify-between text-[11px] tabular-nums">
-                  <span className={active ? 'text-blue-600 font-bold' : 'text-slate-500 font-semibold'}>
-                    Adım {m.step}
-                  </span>
-                  <span className="text-slate-400">{m.est}</span>
-                </div>
-                <div className="text-xs font-bold text-slate-900">{m.title}</div>
-                <p className="text-[11px] leading-snug text-slate-600">{m.detail}</p>
-              </button>
-            );
-          })}
+        {/* Zero-Config Pipeline Readiness & 1-Click Etsy+Reels Dual Queue */}
+        <div
+          data-testid="colab-zero-config-strip"
+          className="mt-5 flex flex-col gap-3 rounded-xl border border-white/[0.06] bg-[#0E0E11] px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
+        >
+          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-zinc-300">
+            <span className="font-medium text-[#F5F5F7]">
+              {readiness.deliveryPreset.label}
+            </span>
+            <span aria-hidden="true" className="text-zinc-600">·</span>
+            <span className="font-mono text-[11px] text-zinc-400 tabular-nums">
+              {readiness.deliveryPreset.width}×{readiness.deliveryPreset.height}
+            </span>
+            <span aria-hidden="true" className="text-zinc-600">·</span>
+            <span
+              className={
+                readiness.blenderStatus === 'pre_rendered'
+                  ? 'text-[#30D158]'
+                  : readiness.requiresColabBlenderRender
+                    ? 'text-[#0A84FF]'
+                    : 'text-zinc-400'
+              }
+            >
+              {readiness.blenderStatusLabel}
+            </span>
+            <span aria-hidden="true" className="text-zinc-600">·</span>
+            <span className="text-zinc-400">
+              {readiness.hasKeyframesPair
+                ? 'İlk + Son Kare Hazır'
+                : readiness.hasFirstFrame
+                  ? 'İlk Kare Hazır'
+                  : 'Referans Opsiyonel'}
+            </span>
+          </div>
+
+          {onAddEtsyAndSocialPair && (
+            <button
+              type="button"
+              data-testid="colab-etsy-reels-pair-btn"
+              onClick={() => onAddEtsyAndSocialPair(project.id)}
+              className="inline-flex items-center gap-1.5 rounded-full border border-[#30D158]/35 bg-[#30D158]/10 px-3.5 py-1.5 text-xs font-medium text-[#30D158] transition-colors hover:bg-[#30D158]/20 whitespace-nowrap shrink-0"
+            >
+              <Layers className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Etsy + Reels Kuyruğa Ekle</span>
+            </button>
+          )}
         </div>
       </section>
 
-      <TelemetryBridgePanel
+      {/* 2. GPU Health Check */}
+      <GpuHealthCheckPanel
+        project={project}
+        projects={projects}
         telemetry={telemetry}
         wsStatus={wsStatus}
         ingestToken={ingestToken}
         pingSending={pingSending}
-        onSendBridgePing={onSendBridgePing}
+        healthResult={healthResult}
+        lastCheckedAt={lastCheckedAt}
+        history={healthHistory}
+        onRunManualCheck={() => recordHealthCheckEntry('manual')}
+        onSimulateRuntimeConnect={async (preset) => {
+          await onSendBridgePing({
+            gpuName: preset.gpuName,
+            vramTotalGb: preset.vramTotalGb,
+            vramUsedGb: preset.vramUsedGb,
+            systemRamTotalGb: preset.systemRamTotalGb,
+            systemRamUsedGb: preset.systemRamUsedGb,
+            diskFreeGb: preset.diskFreeGb,
+          });
+        }}
+        onSelectProject={onSelectProject}
+        onRelaxProjectPolicyTo40Gb={(projectId) =>
+          onUpdateProjectGpuPolicy(projectId, '80GB_OR_40GB')
+        }
         onResetTelemetry={onResetTelemetry}
       />
 
+      {/* 3. Batch Queue + Collapsible Scheduler */}
       <BatchQueuePanel
         queue={batchQueue}
         projects={projects}
@@ -541,552 +666,448 @@ export function ColabConsoleView({
         }
       />
 
-      {/* Preferences & Hardware Guardrail Simulator */}
-      <div className="grid gap-6 lg:grid-cols-12 items-start">
-        <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-6 lg:col-span-5">
-          <div>
-            <h2 className="text-base font-bold text-slate-900">
-              Üretim Tercihleri &amp; Korumalar
-            </h2>
-            <p className="mt-0.5 text-xs text-slate-500">
-              Günlük kullanım için temel ayarlar. Değişiklikler otomatik olarak uygulanır.
-            </p>
-          </div>
+      {/* 4. Single Quiet Disclosure for Advanced Tools, Telemetry, Simulator & Raw Code */}
+      <section className="overflow-hidden rounded-2xl border border-white/[0.08] bg-[#141417]">
+        <button
+          type="button"
+          onClick={() => setShowAdvancedDrawer((v) => !v)}
+          className="flex w-full items-center justify-between px-6 py-4 text-left transition-colors hover:bg-white/[0.02]"
+        >
+          <span className="inline-flex items-center gap-2.5 text-sm font-medium text-[#F5F5F7]">
+            <SlidersHorizontal className="h-4 w-4 text-zinc-400" aria-hidden="true" />
+            <span>Gelişmiş Ayarlar, Simülatör ve Kod</span>
+          </span>
+          <ChevronDown
+            className={`h-4 w-4 text-zinc-500 transition-transform ${
+              showAdvancedDrawer ? 'rotate-180' : ''
+            }`}
+            aria-hidden="true"
+          />
+        </button>
 
-          <div className="divide-y divide-slate-200 rounded-lg border border-slate-200 bg-slate-50">
-            <label className="flex items-start justify-between gap-3 p-3.5 text-xs cursor-pointer">
-              <span>
-                <strong className="text-slate-900">Videoları Bilgisayara İndir</strong>
-                <span className="mt-0.5 block text-[11px] text-slate-500">
-                  Üretilen tüm videolar doğrudan proje çıktı klasörüne alınır.
-                </span>
-              </span>
-              <input
-                type="checkbox"
-                checked={config.localOutputPrimary}
-                onChange={(e) =>
-                  onUpdateConfig({ ...config, localOutputPrimary: e.target.checked })
-                }
-                className="mt-0.5 h-4 w-4 rounded border-slate-300 accent-blue-600 shrink-0"
-              />
-            </label>
+        {showAdvancedDrawer && (
+          <div className="space-y-6 border-t border-white/[0.06] bg-[#0E0E11] p-6">
+            <TelemetryBridgePanel
+              telemetry={telemetry}
+              wsStatus={wsStatus}
+              ingestToken={ingestToken}
+              pingSending={pingSending}
+              onSendBridgePing={() => onSendBridgePing()}
+              onResetTelemetry={onResetTelemetry}
+            />
 
-            <label className="flex items-start justify-between gap-3 p-3.5 text-xs cursor-pointer">
-              <span>
-                <strong className="text-slate-900">Google Drive’a Yedekle</strong>
-                <span className="mt-0.5 block text-[11px] text-slate-500">
-                  Ek güvenlik olarak üretilen videoları Google Drive’a kopyalar.
-                </span>
-              </span>
-              <input
-                type="checkbox"
-                checked={config.autoSyncOutputsToDrive}
-                onChange={(e) =>
-                  onUpdateConfig({ ...config, autoSyncOutputsToDrive: e.target.checked })
-                }
-                className="mt-0.5 h-4 w-4 rounded border-slate-300 accent-blue-600 shrink-0"
-              />
-            </label>
+            <div className="grid gap-5 lg:grid-cols-12 items-start">
+              {/* Preferences with Apple Toggles */}
+              <section className="space-y-4 rounded-2xl border border-white/[0.08] bg-[#141417] p-5 lg:col-span-5">
+                <h3 className="text-sm font-semibold text-[#F5F5F7]">
+                  Üretim Tercihleri &amp; Korumalar
+                </h3>
 
-            <label className="flex items-start justify-between gap-3 p-3.5 text-xs cursor-pointer">
-              <span>
-                <strong className="text-slate-900">Hızlı Model İndirme (hf_transfer)</strong>
-                <span className="mt-0.5 block text-[11px] text-slate-500">
-                  HF_HUB_ENABLE_HF_TRANSFER=1 bayrağıyla modelleri Colab veri merkezi ağından çoklu bağlantıyla çeker.
-                </span>
-              </span>
-              <input
-                type="checkbox"
-                checked={config.enableHfTransfer}
-                onChange={(e) =>
-                  onUpdateConfig({ ...config, enableHfTransfer: e.target.checked })
-                }
-                className="mt-0.5 h-4 w-4 rounded border-slate-300 accent-blue-600 shrink-0"
-              />
-            </label>
-
-            <label className="flex items-start justify-between gap-3 p-3.5 text-xs cursor-pointer">
-              <span>
-                <strong className="text-slate-900">Bellek Taşması Koruması</strong>
-                <span className="mt-0.5 block text-[11px] text-slate-500">
-                  Video birleştirme sırasında sistem çökmesini önlemek için parçalı işler.
-                </span>
-              </span>
-              <input
-                type="checkbox"
-                checked={config.comfyui.useTiledVaeDecode}
-                onChange={(e) =>
-                  onUpdateConfig({
-                    ...config,
-                    comfyui: { ...config.comfyui, useTiledVaeDecode: e.target.checked },
-                  })
-                }
-                className="mt-0.5 h-4 w-4 rounded border-slate-300 accent-blue-600 shrink-0"
-              />
-            </label>
-
-            <label className="flex items-start justify-between gap-3 p-3.5 text-xs cursor-pointer">
-              <span>
-                <strong className="text-slate-900">Hızlandırılmış Ön Ayar (Sage + Turbo)</strong>
-                <span className="mt-0.5 block text-[11px] text-slate-500">
-                  TeaCache ve 8 adımlı hızlı üretim modunu etkinleştirir (uyumlu LoRA gerekir).
-                </span>
-              </span>
-              <input
-                type="checkbox"
-                checked={config.comfyui.enableTeaCache || config.comfyui.enableTurboLora}
-                onChange={(e) =>
-                  onUpdateConfig({
-                    ...config,
-                    comfyui: {
-                      ...config.comfyui,
-                      enableTeaCache: e.target.checked,
-                      enableTurboLora: e.target.checked,
+                <div className="divide-y divide-white/[0.06] rounded-xl border border-white/[0.06] bg-[#0E0E11]">
+                  {[
+                    {
+                      label: 'Videoları Bilgisayara İndir',
+                      hint: 'Çıktıları yerel klasöre alır.',
+                      checked: config.localOutputPrimary,
+                      onChange: (next: boolean) =>
+                        onUpdateConfig({ ...config, localOutputPrimary: next }),
                     },
-                  })
-                }
-                className="mt-0.5 h-4 w-4 rounded border-slate-300 accent-blue-600 shrink-0"
-              />
-            </label>
-
-            <label className="flex items-start justify-between gap-3 p-3.5 text-xs cursor-pointer">
-              <span>
-                <strong className="text-slate-900">Yanlış GPU’da Krediyi Koru</strong>
-                <span className="mt-0.5 block text-[11px] text-slate-500">
-                  A100 dışı bir kart verilirse oturumu boşa kredi yakmadan hemen kapatır.
-                </span>
-              </span>
-              <input
-                type="checkbox"
-                checked={config.strictKillOnMismatch}
-                onChange={(e) =>
-                  onUpdateConfig({ ...config, strictKillOnMismatch: e.target.checked })
-                }
-                className="mt-0.5 h-4 w-4 rounded border-slate-300 accent-blue-600 shrink-0"
-              />
-            </label>
-
-            <label className="flex items-start justify-between gap-3 p-3.5 text-xs cursor-pointer">
-              <span>
-                <strong className="text-slate-900">Sıra Bitince Oturumu Kapat</strong>
-                <span className="mt-0.5 block text-[11px] text-slate-500">
-                  Tüm videolar indikten sonra Colab makinesini otomatik serbest bırakır.
-                </span>
-              </span>
-              <input
-                type="checkbox"
-                checked={config.autoUnassignOnFinish}
-                onChange={(e) =>
-                  onUpdateConfig({ ...config, autoUnassignOnFinish: e.target.checked })
-                }
-                className="mt-0.5 h-4 w-4 rounded border-slate-300 accent-blue-600 shrink-0"
-              />
-            </label>
-          </div>
-
-          {/* Collapsible Advanced Settings */}
-          <div className="rounded-lg border border-slate-200 bg-white">
-            <button
-              type="button"
-              onClick={() => setShowAdvancedSettings((v) => !v)}
-              className="flex w-full items-center justify-between px-4 py-3 text-left text-xs font-semibold text-slate-700 hover:bg-slate-50"
-            >
-              <span>Gelişmiş Model &amp; Bildirim Ayarları</span>
-              <ChevronDown
-                className={`h-4 w-4 text-slate-400 transition-transform ${
-                  showAdvancedSettings ? 'rotate-180' : ''
-                }`}
-                aria-hidden="true"
-              />
-            </button>
-
-            {showAdvancedSettings && (
-              <div className="border-t border-slate-200 p-4 space-y-4">
-                <div className="space-y-1.5">
-                  <label
-                    htmlFor="repo-80gb"
-                    className="block text-xs font-medium text-slate-700"
-                  >
-                    80 GB GPU Model Adresi
-                  </label>
-                  <div className="flex gap-2">
-                    <input
-                      id="repo-80gb"
-                      type="text"
-                      value={config.modelMatrix.repo80Gb}
-                      onChange={(e) =>
+                    {
+                      label: 'Google Drive’a Yedekle',
+                      hint: 'Videoları otomatik Drive’a kopyalar.',
+                      checked: config.autoSyncOutputsToDrive,
+                      onChange: (next: boolean) =>
+                        onUpdateConfig({ ...config, autoSyncOutputsToDrive: next }),
+                    },
+                    {
+                      label: 'Hızlı Model İndirme (hf_transfer)',
+                      hint: 'Çoklu bağlantıyla model indirir.',
+                      checked: config.enableHfTransfer,
+                      onChange: (next: boolean) =>
+                        onUpdateConfig({ ...config, enableHfTransfer: next }),
+                    },
+                    {
+                      label: 'Bellek Taşması Koruması',
+                      hint: 'Parçalı VAE decode ile çökmeyi önler.',
+                      checked: config.comfyui.useTiledVaeDecode,
+                      onChange: (next: boolean) =>
                         onUpdateConfig({
                           ...config,
-                          modelMatrix: { ...config.modelMatrix, repo80Gb: e.target.value },
-                        })
-                      }
-                      className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 py-1.5 font-mono text-xs text-slate-900 focus:border-blue-600 focus:outline-none"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => verifyHuggingFaceRepo('80gb', config.modelMatrix.repo80Gb)}
-                      disabled={hfVerifyingTier === '80gb'}
-                      className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 whitespace-nowrap"
+                          comfyui: { ...config.comfyui, useTiledVaeDecode: next },
+                        }),
+                    },
+                    {
+                      label: 'Yanlış GPU’da Krediyi Koru',
+                      hint: 'Uyumsuz kartta oturumu hemen kapatır.',
+                      checked: config.strictKillOnMismatch,
+                      onChange: (next: boolean) =>
+                        onUpdateConfig({ ...config, strictKillOnMismatch: next }),
+                    },
+                    {
+                      label: 'Sıra Bitince Oturumu Kapat',
+                      hint: 'İş bitince Colab makinesini kapatır.',
+                      checked: config.autoUnassignOnFinish,
+                      onChange: (next: boolean) =>
+                        onUpdateConfig({ ...config, autoUnassignOnFinish: next }),
+                    },
+                  ].map((item) => (
+                    <div
+                      key={item.label}
+                      className="flex items-center justify-between gap-4 px-4 py-3 text-xs"
                     >
-                      {hfVerifyingTier === '80gb' && (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-                      )}
-                      Doğrula
-                    </button>
-                  </div>
-                  {renderHfStatus(hfResults['80gb'])}
+                      <div>
+                        <div className="font-medium text-[#F5F5F7]">{item.label}</div>
+                        <div className="text-[11px] text-zinc-500">{item.hint}</div>
+                      </div>
+                      <AppleToggle
+                        checked={item.checked}
+                        onChange={item.onChange}
+                        label={item.label}
+                      />
+                    </div>
+                  ))}
                 </div>
 
-                <div className="space-y-1.5">
-                  <label
-                    htmlFor="repo-40gb"
-                    className="block text-xs font-medium text-slate-700"
-                  >
-                    40 GB GPU Model Adresi
-                  </label>
-                  <div className="flex gap-2">
-                    <input
-                      id="repo-40gb"
-                      type="text"
-                      value={config.modelMatrix.repo40Gb}
-                      onChange={(e) =>
-                        onUpdateConfig({
-                          ...config,
-                          modelMatrix: { ...config.modelMatrix, repo40Gb: e.target.value },
-                        })
-                      }
-                      className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 py-1.5 font-mono text-xs text-slate-900 focus:border-blue-600 focus:outline-none"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => verifyHuggingFaceRepo('40gb', config.modelMatrix.repo40Gb)}
-                      disabled={hfVerifyingTier === '40gb'}
-                      className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 whitespace-nowrap"
-                    >
-                      {hfVerifyingTier === '40gb' && (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-                      )}
-                      Doğrula
-                    </button>
-                  </div>
-                  {renderHfStatus(hfResults['40gb'])}
-                </div>
-
-                <div className="space-y-1.5">
-                  <label
-                    htmlFor="hf-session-token"
-                    className="block text-xs font-medium text-slate-700"
-                  >
-                    HuggingFace Anahtarı (İsteğe Bağlı Anlık Test)
-                  </label>
-                  <input
-                    id="hf-session-token"
-                    type="password"
-                    autoComplete="off"
-                    placeholder="hf_..."
-                    value={hfSessionToken}
-                    onChange={(e) => setHfSessionToken(e.target.value)}
-                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 font-mono text-xs text-slate-900 placeholder:text-slate-400 focus:border-blue-600 focus:outline-none"
-                  />
-                </div>
-
-                <label className="flex items-center justify-between gap-3 text-xs text-slate-700 cursor-pointer">
-                  <span>İş bitince Discord/Slack bildirimi gönder</span>
-                  <input
-                    type="checkbox"
-                    checked={config.webhookNotifyOnFailure}
-                    onChange={(e) =>
-                      onUpdateConfig({ ...config, webhookNotifyOnFailure: e.target.checked })
-                    }
-                    className="h-4 w-4 rounded border-slate-300 accent-blue-600"
-                  />
-                </label>
-
-                {config.webhookNotifyOnFailure && (
-                  <div className="space-y-2">
+                {/* HuggingFace Repos + Webhook */}
+                <div className="space-y-3 pt-1">
+                  <div className="space-y-1">
+                    <label htmlFor="repo-80gb" className="block text-xs text-zinc-400">
+                      80 GB GPU Model Adresi
+                    </label>
                     <div className="flex gap-2">
                       <input
-                        type="url"
-                        aria-label="HTTPS Webhook URL"
-                        placeholder="https://discord.com/api/webhooks/..."
-                        value={config.webhookUrlPlaceholder}
+                        id="repo-80gb"
+                        type="text"
+                        value={config.modelMatrix.repo80Gb}
                         onChange={(e) =>
-                          onUpdateConfig({ ...config, webhookUrlPlaceholder: e.target.value })
+                          onUpdateConfig({
+                            ...config,
+                            modelMatrix: { ...config.modelMatrix, repo80Gb: e.target.value },
+                          })
                         }
-                        className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 py-1.5 font-mono text-xs text-slate-900 placeholder:text-slate-400 focus:border-blue-600 focus:outline-none"
+                        className="min-w-0 flex-1 rounded-xl border border-white/[0.08] bg-[#0E0E11] px-3 py-1.5 font-mono text-xs text-[#F5F5F7] focus:border-[#0A84FF] focus:outline-none"
                       />
                       <button
                         type="button"
-                        onClick={handleTestWebhook}
-                        disabled={webhookTesting}
-                        className="inline-flex items-center gap-1 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
+                        onClick={() => verifyHuggingFaceRepo('80gb', config.modelMatrix.repo80Gb)}
+                        disabled={hfVerifyingTier === '80gb'}
+                        className="rounded-full border border-white/[0.08] bg-[#1C1C20] px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-white/[0.08] whitespace-nowrap"
                       >
-                        <Send className="h-3 w-3" aria-hidden="true" />
-                        Test Et
+                        Doğrula
                       </button>
                     </div>
-                    {webhookStatus && (
-                      <p
-                        className={`text-xs ${
-                          webhookStatus.ok ? 'text-emerald-700' : 'text-rose-700'
+                    {renderHfStatus(hfResults['80gb'])}
+                  </div>
+
+                  <div className="space-y-1">
+                    <label htmlFor="repo-40gb" className="block text-xs text-zinc-400">
+                      40 GB GPU Model Adresi
+                    </label>
+                    <div className="flex gap-2">
+                      <input
+                        id="repo-40gb"
+                        type="text"
+                        value={config.modelMatrix.repo40Gb}
+                        onChange={(e) =>
+                          onUpdateConfig({
+                            ...config,
+                            modelMatrix: { ...config.modelMatrix, repo40Gb: e.target.value },
+                          })
+                        }
+                        className="min-w-0 flex-1 rounded-xl border border-white/[0.08] bg-[#0E0E11] px-3 py-1.5 font-mono text-xs text-[#F5F5F7] focus:border-[#0A84FF] focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => verifyHuggingFaceRepo('40gb', config.modelMatrix.repo40Gb)}
+                        disabled={hfVerifyingTier === '40gb'}
+                        className="rounded-full border border-white/[0.08] bg-[#1C1C20] px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-white/[0.08] whitespace-nowrap"
+                      >
+                        Doğrula
+                      </button>
+                    </div>
+                    {renderHfStatus(hfResults['40gb'])}
+                  </div>
+
+                  <div className="space-y-1">
+                    <label htmlFor="hf-session-token" className="block text-xs text-zinc-400">
+                      HuggingFace Token (İsteğe Bağlı)
+                    </label>
+                    <input
+                      id="hf-session-token"
+                      type="password"
+                      autoComplete="off"
+                      placeholder="hf_..."
+                      value={hfSessionToken}
+                      onChange={(e) => setHfSessionToken(e.target.value)}
+                      className="w-full rounded-xl border border-white/[0.08] bg-[#0E0E11] px-3 py-1.5 font-mono text-xs text-[#F5F5F7] placeholder:text-zinc-600 focus:border-[#0A84FF] focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between pt-1 text-xs">
+                    <span className="text-zinc-300">Discord / Slack Bildirimi</span>
+                    <AppleToggle
+                      checked={config.webhookNotifyOnFailure}
+                      onChange={(next) =>
+                        onUpdateConfig({ ...config, webhookNotifyOnFailure: next })
+                      }
+                      label="İş bitince bildirim gönder"
+                    />
+                  </div>
+
+                  {config.webhookNotifyOnFailure && (
+                    <div className="space-y-2">
+                      <div className="flex gap-2">
+                        <input
+                          type="url"
+                          aria-label="HTTPS Webhook URL"
+                          placeholder="https://discord.com/api/webhooks/..."
+                          value={config.webhookUrlPlaceholder}
+                          onChange={(e) =>
+                            onUpdateConfig({ ...config, webhookUrlPlaceholder: e.target.value })
+                          }
+                          className="min-w-0 flex-1 rounded-xl border border-white/[0.08] bg-[#0E0E11] px-3 py-1.5 font-mono text-xs text-[#F5F5F7] focus:border-[#0A84FF] focus:outline-none"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleTestWebhook}
+                          disabled={webhookTesting}
+                          className="inline-flex items-center gap-1 rounded-full bg-[#0A84FF] px-3 py-1.5 text-xs font-semibold text-white"
+                        >
+                          <Send className="h-3 w-3" aria-hidden="true" />
+                          Test Et
+                        </button>
+                      </div>
+                      {webhookStatus && (
+                        <p
+                          className={`text-xs ${
+                            webhookStatus.ok ? 'text-[#30D158]' : 'text-[#FF453A]'
+                          }`}
+                        >
+                          {webhookStatus.text}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </section>
+
+              {/* Guardrail Simulator */}
+              <section className="space-y-4 rounded-2xl border border-white/[0.08] bg-[#141417] p-5 lg:col-span-7">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-semibold text-[#F5F5F7]">
+                      GPU Güvenlik Simülatörü
+                    </h3>
+                    <p className="text-xs text-zinc-500">
+                      Farklı ekran kartı senaryolarında otomatik karar davranışını test edin.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setRunCounter((c) => c + 1)}
+                    className="inline-flex items-center gap-1.5 rounded-full bg-[#0A84FF] px-4 py-1.5 text-xs font-semibold text-white hover:brightness-110 whitespace-nowrap"
+                  >
+                    <Play className="h-3 w-3" aria-hidden="true" />
+                    Testi Çalıştır
+                  </button>
+                </div>
+
+                <div className="grid gap-2.5 sm:grid-cols-2">
+                  {GPU_SIMULATION_PRESETS.map((gpu) => {
+                    const active = selectedGpuId === gpu.id;
+                    return (
+                      <button
+                        key={gpu.id}
+                        type="button"
+                        onClick={() => setSelectedGpuId(gpu.id)}
+                        className={`rounded-xl border p-3 text-left transition-colors ${
+                          active
+                            ? 'border-[#0A84FF] bg-[#0A84FF]/15'
+                            : 'border-white/[0.06] bg-[#0E0E11] hover:bg-white/[0.03]'
                         }`}
                       >
-                        {webhookStatus.text}
-                      </p>
+                        <div className="flex items-center gap-1.5 text-xs font-semibold text-[#F5F5F7]">
+                          <Cpu
+                            className={`h-3.5 w-3.5 ${
+                              active ? 'text-[#0A84FF]' : 'text-zinc-500'
+                            }`}
+                            aria-hidden="true"
+                          />
+                          {gpu.label}
+                        </div>
+                        <div className="mt-1 text-[11px] text-zinc-400 tabular-nums">
+                          {gpu.vramGb} GB VRAM · {gpu.systemRamGb} GB RAM
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div
+                  data-testid="guardrail-verdict-banner"
+                  className={`rounded-xl border p-4 ${
+                    isAbort
+                      ? 'border-[#FF453A]/30 bg-[#FF453A]/10 text-rose-100'
+                      : 'border-[#30D158]/30 bg-[#30D158]/10 text-emerald-100'
+                  }`}
+                >
+                  <div className="flex items-start gap-3">
+                    {isAbort ? (
+                      <ShieldAlert className="mt-0.5 h-4 w-4 text-[#FF453A] shrink-0" aria-hidden="true" />
+                    ) : (
+                      <ShieldCheck className="mt-0.5 h-4 w-4 text-[#30D158] shrink-0" aria-hidden="true" />
                     )}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        </section>
-
-        {/* Right: Hardware Guardrail Simulator */}
-        <section className="space-y-5 rounded-xl border border-slate-200 bg-white p-6 lg:col-span-7">
-          <div className="flex flex-col gap-3 border-b border-slate-200 pb-4 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <h2 className="text-base font-bold text-slate-900">
-                GPU Güvenlik Testi (Simülatör)
-              </h2>
-              <p className="text-xs text-slate-600">
-                Colab farklı bir ekran kartı verirse sistemin nasıl karar verdiğini önceden
-                test edin.
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setRunCounter((c) => c + 1)}
-              className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700 whitespace-nowrap shrink-0"
-            >
-              <Play className="h-3.5 w-3.5" aria-hidden="true" />
-              Testi Çalıştır
-            </button>
-          </div>
-
-          <div className="grid gap-3 sm:grid-cols-2">
-            {GPU_SIMULATION_PRESETS.map((gpu) => {
-              const active = selectedGpuId === gpu.id;
-              return (
-                <button
-                  key={gpu.id}
-                  type="button"
-                  onClick={() => setSelectedGpuId(gpu.id)}
-                  className={`flex items-start justify-between rounded-lg border p-3.5 text-left transition-colors duration-150 ${
-                    active
-                      ? 'border-blue-600 bg-blue-50/50'
-                      : 'border-slate-200 bg-slate-50 hover:border-slate-300 hover:bg-white'
-                  }`}
-                >
-                  <div>
-                    <div className="flex items-center gap-1.5 text-xs font-bold text-slate-900">
-                      <Cpu
-                        className={`h-3.5 w-3.5 ${active ? 'text-blue-600' : 'text-slate-400'}`}
-                        aria-hidden="true"
-                      />
-                      {gpu.label}
-                    </div>
-                    <div className="mt-1 font-mono text-[11px] text-slate-500 tabular-nums">
-                      {gpu.vramGb} GB VRAM · {gpu.systemRamGb} GB RAM · {gpu.diskFreeGb} GB Disk
+                    <div className="w-full space-y-1.5 text-xs">
+                      <div className="font-semibold">
+                        {evaluation.verdict} ·{' '}
+                        {evaluation.shouldTerminateSession
+                          ? 'Oturum Otomatik Kapatılacak'
+                          : evaluation.selectedModelRepo}
+                      </div>
+                      <p className="opacity-85">{evaluation.summary}</p>
                     </div>
                   </div>
-                </button>
-              );
-            })}
-          </div>
-
-          <div
-            data-testid="guardrail-verdict-banner"
-            className={`rounded-xl border p-4 ${
-              isAbort
-                ? 'border-rose-200 bg-rose-50 text-rose-900'
-                : 'border-emerald-200 bg-emerald-50 text-emerald-900'
-            }`}
-          >
-            <div className="flex items-start gap-3">
-              {isAbort ? (
-                <ShieldAlert className="mt-0.5 h-5 w-5 text-rose-600 shrink-0" aria-hidden="true" />
-              ) : (
-                <ShieldCheck className="mt-0.5 h-5 w-5 text-emerald-600 shrink-0" aria-hidden="true" />
-              )}
-              <div className="w-full space-y-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-mono text-xs font-bold">{evaluation.verdict}</span>
-                  <span aria-hidden="true">·</span>
-                  <span className="text-xs font-semibold">
-                    {evaluation.shouldTerminateSession
-                      ? 'Kredi Yakmadan Otomatik Kapatılacak'
-                      : `Model: ${evaluation.selectedModelRepo}`}
-                  </span>
                 </div>
-                <p className="text-xs leading-relaxed">{evaluation.summary}</p>
-                {!evaluation.shouldTerminateSession && (
-                  <div className="space-y-1.5 pt-1">
-                    <div className="flex items-center justify-between font-mono text-[11px] tabular-nums">
-                      <span>
-                        VRAM: {evaluation.estimatedVramUsageGb} GB / {selectedGpu.vramGb} GB
+
+                <div className="divide-y divide-white/[0.06] rounded-xl border border-white/[0.06] bg-[#0E0E11]">
+                  {evaluation.checks.map((step) => (
+                    <div key={step.id} className="flex items-center justify-between gap-4 px-4 py-2.5 text-xs">
+                      <div>
+                        <div className="font-medium text-[#F5F5F7]">{step.label}</div>
+                        <div className="text-[11px] text-zinc-500">{step.detail}</div>
+                      </div>
+                      <span
+                        className={`text-[11px] font-semibold shrink-0 ${
+                          step.status === 'pass'
+                            ? 'text-[#30D158]'
+                            : step.status === 'warn'
+                              ? 'text-amber-400'
+                              : 'text-[#FF453A]'
+                        }`}
+                      >
+                        {step.status === 'pass'
+                          ? 'Uygun'
+                          : step.status === 'warn'
+                            ? 'Uyarlandı'
+                            : 'Durduruldu'}
                       </span>
-                      <span>Güvenlik Payı: {evaluation.vramHeadroomGb} GB</span>
                     </div>
-                    <div className="h-2 w-full overflow-hidden rounded-full bg-emerald-200">
-                      <div
-                        className="h-full rounded-full bg-emerald-600 transition-all duration-200"
-                        style={{
-                          width: `${Math.min(
-                            100,
-                            Math.round((evaluation.estimatedVramUsageGb / selectedGpu.vramGb) * 100)
-                          )}%`,
-                        }}
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-
-          <div className="divide-y divide-slate-200 rounded-lg border border-slate-200 bg-slate-50">
-            {evaluation.checks.map((step) => (
-              <div key={step.id} className="flex items-start justify-between gap-4 px-4 py-3">
-                <div>
-                  <div className="text-xs font-bold text-slate-900">{step.label}</div>
-                  <div className="mt-0.5 text-xs text-slate-600">{step.detail}</div>
-                </div>
-                <span
-                  className={`text-[11px] font-bold uppercase shrink-0 ${
-                    step.status === 'pass'
-                      ? 'text-emerald-700'
-                      : step.status === 'warn'
-                        ? 'text-amber-700'
-                        : 'text-rose-700'
-                  }`}
-                >
-                  {step.status === 'pass'
-                    ? 'UYGUN'
-                    : step.status === 'warn'
-                      ? 'UYARLANDI'
-                      : 'DURDURULDU'}
-                </span>
-              </div>
-            ))}
-          </div>
-        </section>
-      </div>
-
-      {/* Collapsible Notebook Code Inspector (hidden by default for visual simplicity) */}
-      <section className="rounded-xl border border-slate-200 bg-white">
-        <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4">
-          <button
-            type="button"
-            onClick={() => setShowNotebookCode((v) => !v)}
-            className="flex items-center gap-2 text-left"
-          >
-            <ChevronDown
-              className={`h-4 w-4 text-slate-500 transition-transform ${
-                showNotebookCode ? 'rotate-180' : ''
-              }`}
-              aria-hidden="true"
-            />
-            <div>
-              <h2 className="text-sm font-bold text-slate-900">
-                Teknik Detay: Oluşturulan Colab Çalıştırma Dosyası (.ipynb)
-              </h2>
-              <p className="text-xs text-slate-500">
-                İsterseniz arka planda otomatik üretilen adımları buradan inceleyebilirsiniz.
-              </p>
-            </div>
-          </button>
-
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={handleCopyNotebook}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
-            >
-              {copiedNb ? (
-                <>
-                  <Check className="h-3.5 w-3.5 text-emerald-600" aria-hidden="true" />
-                  Kopyalandı
-                </>
-              ) : (
-                <>
-                  <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-                  Kopyala
-                </>
-              )}
-            </button>
-            <button
-              type="button"
-              onClick={() =>
-                onDownloadFile(
-                  'minimax_h3_colab_automation.ipynb',
-                  notebookJson,
-                  'application/x-ipynb+json'
-                )
-              }
-              className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
-            >
-              <Download className="h-3.5 w-3.5" aria-hidden="true" />
-              .ipynb İndir
-            </button>
-          </div>
-        </div>
-
-        {showNotebookCode && (
-          <div className="border-t border-slate-200 p-6 space-y-4">
-            <div className="inline-flex rounded-lg border border-slate-200 bg-slate-100 p-1">
-              <button
-                type="button"
-                onClick={() => setNotebookInspectMode('cells')}
-                className={`rounded-md px-2.5 py-1 text-xs font-semibold ${
-                  notebookInspectMode === 'cells'
-                    ? 'bg-white text-slate-900 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                Adım Adım ({parsedCells.length})
-              </button>
-              <button
-                type="button"
-                onClick={() => setNotebookInspectMode('raw')}
-                className={`rounded-md px-2.5 py-1 text-xs font-semibold ${
-                  notebookInspectMode === 'raw'
-                    ? 'bg-white text-slate-900 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                Ham JSON
-              </button>
-            </div>
-
-            {notebookInspectMode === 'cells' && parsedCells.length > 0 ? (
-              <div className="space-y-3">
-                <div className="flex items-center gap-1.5 overflow-x-auto rounded-lg border border-slate-200 bg-slate-100 p-1">
-                  {parsedCells.map((c) => (
-                    <button
-                      key={c.index}
-                      type="button"
-                      onClick={() => setSelectedCellIndex(c.index)}
-                      className={`rounded-md px-3 py-1.5 text-xs font-medium whitespace-nowrap shrink-0 ${
-                        (currentCell?.index ?? 0) === c.index
-                          ? 'bg-white text-slate-900 font-semibold shadow-xs'
-                          : 'text-slate-600 hover:text-slate-900'
-                      }`}
-                    >
-                      Adım {c.index + 1} · {c.title}
-                    </button>
                   ))}
                 </div>
-                {currentCell && (
-                  <pre className="max-h-80 overflow-auto rounded-xl border border-slate-200 bg-slate-50 p-4 font-mono text-[11px] leading-relaxed text-slate-800">
-                    {currentCell.code}
-                  </pre>
-                )}
+              </section>
+            </div>
+
+            {/* Notebook Code Inspector */}
+            <section className="overflow-hidden rounded-2xl border border-white/[0.08] bg-[#141417]">
+              <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3.5">
+                <button
+                  type="button"
+                  onClick={() => setShowNotebookCode((v) => !v)}
+                  className="flex items-center gap-2 text-left text-xs font-semibold text-[#F5F5F7]"
+                >
+                  <ChevronDown
+                    className={`h-4 w-4 text-zinc-400 transition-transform ${
+                      showNotebookCode ? 'rotate-180' : ''
+                    }`}
+                    aria-hidden="true"
+                  />
+                  <span>Oluşturulan Colab Çalıştırma Dosyası (.ipynb)</span>
+                </button>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleCopyNotebook}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-white/[0.08] bg-[#1C1C20] px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-white/[0.08]"
+                  >
+                    {copiedNb ? (
+                      <>
+                        <Check className="h-3.5 w-3.5 text-[#30D158]" aria-hidden="true" />
+                        Kopyalandı
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+                        Kopyala
+                      </>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onDownloadFile(
+                        'minimax_h3_colab_automation.ipynb',
+                        notebookJson,
+                        'application/x-ipynb+json'
+                      )
+                    }
+                    className="inline-flex items-center gap-1.5 rounded-full bg-[#0A84FF] px-3.5 py-1.5 text-xs font-semibold text-white hover:brightness-110"
+                  >
+                    <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                    .ipynb İndir
+                  </button>
+                </div>
               </div>
-            ) : (
-              <pre className="max-h-80 overflow-auto rounded-xl border border-slate-200 bg-slate-50 p-4 font-mono text-[11px] leading-relaxed text-slate-800">
-                {notebookJson}
-              </pre>
-            )}
+
+              {showNotebookCode && (
+                <div className="border-t border-white/[0.06] p-5 space-y-4">
+                  <div className="inline-flex rounded-lg border border-white/[0.06] bg-[#0E0E11] p-0.5">
+                    <button
+                      type="button"
+                      onClick={() => setNotebookInspectMode('cells')}
+                      className={`rounded-md px-3 py-1 text-xs font-medium ${
+                        notebookInspectMode === 'cells'
+                          ? 'bg-white/[0.12] text-white'
+                          : 'text-zinc-400 hover:text-zinc-200'
+                      }`}
+                    >
+                      Hücreler ({parsedCells.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setNotebookInspectMode('raw')}
+                      className={`rounded-md px-3 py-1 text-xs font-medium ${
+                        notebookInspectMode === 'raw'
+                          ? 'bg-white/[0.12] text-white'
+                          : 'text-zinc-400 hover:text-zinc-200'
+                      }`}
+                    >
+                      Ham JSON
+                    </button>
+                  </div>
+
+                  {notebookInspectMode === 'cells' && parsedCells.length > 0 ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-1.5 overflow-x-auto rounded-xl border border-white/[0.06] bg-[#0E0E11] p-1">
+                        {parsedCells.map((c) => (
+                          <button
+                            key={c.index}
+                            type="button"
+                            onClick={() => setSelectedCellIndex(c.index)}
+                            className={`rounded-lg px-3 py-1.5 text-xs font-medium whitespace-nowrap shrink-0 ${
+                              (currentCell?.index ?? 0) === c.index
+                                ? 'bg-white/[0.12] text-white'
+                                : 'text-zinc-400 hover:text-zinc-200'
+                            }`}
+                          >
+                            {c.index + 1}. {c.title}
+                          </button>
+                        ))}
+                      </div>
+                      {currentCell && (
+                        <pre className="max-h-72 overflow-auto rounded-xl border border-white/[0.06] bg-[#0E0E11] p-4 font-mono text-[11px] leading-relaxed text-zinc-300">
+                          {currentCell.code}
+                        </pre>
+                      )}
+                    </div>
+                  ) : (
+                    <pre className="max-h-72 overflow-auto rounded-xl border border-white/[0.06] bg-[#0E0E11] p-4 font-mono text-[11px] leading-relaxed text-zinc-300">
+                      {notebookJson}
+                    </pre>
+                  )}
+                </div>
+              )}
+            </section>
           </div>
         )}
       </section>
@@ -1096,20 +1117,20 @@ export function ColabConsoleView({
           role="dialog"
           aria-modal="true"
           aria-labelledby="overwrite-dialog-title"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4 backdrop-blur-xs"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-md"
         >
-          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-xl">
+          <div className="w-full max-w-md rounded-2xl border border-white/[0.1] bg-[#141417] p-6 shadow-2xl">
             <div className="flex items-start gap-3">
-              <AlertTriangle className="mt-0.5 h-5 w-5 text-amber-600 shrink-0" aria-hidden="true" />
+              <AlertTriangle className="mt-0.5 h-5 w-5 text-amber-400 shrink-0" aria-hidden="true" />
               <div className="space-y-2">
-                <h2 id="overwrite-dialog-title" className="text-base font-bold text-slate-900">
+                <h2 id="overwrite-dialog-title" className="text-base font-semibold text-[#F5F5F7]">
                   Drive’daki Mevcut Dosyalar Güncellensin mi?
                 </h2>
-                <p className="text-xs leading-relaxed text-slate-600">
+                <p className="text-xs leading-relaxed text-zinc-400">
                   Aynı ada sahip <strong>{pendingPlan.existingNamesToOverwrite.length}</strong>{' '}
                   dosya bulundu:
                 </p>
-                <ul className="max-h-36 overflow-auto rounded-lg border border-slate-200 bg-slate-50 p-2.5 font-mono text-[11px] text-slate-700 space-y-1">
+                <ul className="max-h-36 overflow-auto rounded-xl border border-white/[0.06] bg-[#0E0E11] p-3 font-mono text-[11px] text-zinc-300 space-y-1">
                   {pendingPlan.existingNamesToOverwrite.map((name) => (
                     <li key={name}>{name}</li>
                   ))}
@@ -1124,14 +1145,14 @@ export function ColabConsoleView({
                   setPendingPlan(null);
                   setSyncStage('idle');
                 }}
-                className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                className="rounded-full border border-white/[0.08] bg-[#1C1C20] px-4 py-2 text-xs font-medium text-zinc-200 hover:bg-white/[0.08]"
               >
                 İptal
               </button>
               <button
                 type="button"
                 onClick={() => runDriveUpload(pendingPlan)}
-                className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700"
+                className="rounded-full bg-[#0A84FF] px-4 py-2 text-xs font-semibold text-white hover:brightness-110"
               >
                 Onayla ve Güncelle
               </button>

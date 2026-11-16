@@ -1,13 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState, type ChangeEvent } from 'react';
 import {
-  ArrowRight,
-  Check,
   CheckCircle2,
-  ChevronDown,
-  ChevronUp,
   Clock,
   Eye,
   Film,
+  FolderOpen,
   Loader2,
   Pencil,
   Play,
@@ -18,8 +15,10 @@ import {
   X,
 } from 'lucide-react';
 import {
+  AutomationConfig,
   BatchQueueItem,
   ColabProject,
+  DeliveryPresetId,
   TelemetrySnapshot,
   WorkspaceTab,
 } from '../types/automation';
@@ -32,20 +31,36 @@ import {
   type ProjectDetailUpdateInput,
   type ProjectProgressSummary,
 } from '../utils/projectProgress';
+import {
+  createSampleEtsyClaudeBundleRawFiles,
+  inspectProjectPipelineReadiness,
+} from '../utils/claudeBundle';
+import type { RawFileInput } from '../utils/guardrailEngine';
+import { filesToRawInputs } from '../utils/fileImport';
 import { ProjectEditModal } from './ProjectEditModal';
 import {
   ProjectQuickPreviewModal,
   type QuickPreviewLayerKey,
 } from './ProjectQuickPreviewModal';
+import { RenderThroughputPanel } from './RenderThroughputPanel';
 
 interface ProjectDashboardProps {
   projects: ColabProject[];
   activeProjectId: string;
   batchQueue: BatchQueueItem[];
+  config: AutomationConfig;
   telemetry: TelemetrySnapshot;
   onSelectAndOpenProject: (projectId: string) => void;
   onOpenProjectInColab: (projectId: string) => void;
-  onCreateProject: (name: string, description: string) => void;
+  onCreateProject: (
+    name: string,
+    description: string,
+    deliveryPreset?: DeliveryPresetId
+  ) => void;
+  onImportClaudeBundle?: (
+    rawFiles: RawFileInput[],
+    options?: { openInStudio?: boolean; autoQueueEtsyAndReels?: boolean }
+  ) => ColabProject | null;
   onUpdateProjectDetails: (
     projectId: string,
     updates: ProjectDetailUpdateInput
@@ -64,23 +79,6 @@ const FILTER_OPTIONS: { id: DashboardFilterOption; label: string }[] = [
   { id: 'tamamlandi', label: 'Tamamlandı' },
 ];
 
-const PIPELINE_STEPS: {
-  key: DashboardStageKey;
-  shortLabel: string;
-  fullLabel: string;
-  pct: number;
-}[] = [
-  { key: 'kuyrukta', shortLabel: 'Sırada', fullLabel: 'Kuyrukta', pct: 0 },
-  { key: 'hazirlaniyor', shortLabel: 'Hazırlık', fullLabel: 'Hazırlanıyor', pct: 35 },
-  { key: 'isleniyor', shortLabel: 'Render', fullLabel: 'İşleniyor', pct: 68 },
-  { key: 'tamamlandi', shortLabel: 'Hazır', fullLabel: 'Tamamlandı', pct: 100 },
-];
-
-const GPU_POLICY_LABELS: Record<ColabProject['targetGpuPolicy'], string> = {
-  '80GB_ONLY': 'A100 80GB',
-  '80GB_OR_40GB': 'A100 80GB / 40GB',
-};
-
 function isVideoAssetName(name: string, mime: string): boolean {
   return mime.startsWith('video/') || /\.(mp4|mov|webm|mkv)$/i.test(name);
 }
@@ -89,28 +87,23 @@ function getStageVisual(stageKey: DashboardStageKey) {
   switch (stageKey) {
     case 'tamamlandi':
       return {
-        textClass: 'text-emerald-700',
-        barClass: 'bg-emerald-600',
-        activeDotClass: 'border-emerald-600 bg-emerald-600 text-white',
-        icon: <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 shrink-0" aria-hidden="true" />,
+        textClass: 'text-[#30D158]',
+        barClass: 'bg-[#30D158]',
+        icon: <CheckCircle2 className="h-3.5 w-3.5 text-[#30D158] shrink-0" aria-hidden="true" />,
       };
     case 'hazirlaniyor':
       return {
-        textClass: 'text-amber-700',
-        barClass: 'bg-amber-500',
-        activeDotClass: 'border-amber-600 bg-amber-500 text-white',
-        icon: (
-          <Sparkles className="h-3.5 w-3.5 text-amber-600 shrink-0" aria-hidden="true" />
-        ),
+        textClass: 'text-[#FF9F0A]',
+        barClass: 'bg-[#FF9F0A]',
+        icon: <Sparkles className="h-3.5 w-3.5 text-[#FF9F0A] shrink-0" aria-hidden="true" />,
       };
     case 'isleniyor':
       return {
-        textClass: 'text-blue-700',
-        barClass: 'bg-blue-600',
-        activeDotClass: 'border-blue-600 bg-blue-600 text-white',
+        textClass: 'text-[#0A84FF]',
+        barClass: 'bg-[#0A84FF]',
         icon: (
           <Loader2
-            className="h-3.5 w-3.5 text-blue-600 animate-spin motion-reduce:animate-none shrink-0"
+            className="h-3.5 w-3.5 text-[#0A84FF] animate-spin motion-reduce:animate-none shrink-0"
             aria-hidden="true"
           />
         ),
@@ -118,10 +111,9 @@ function getStageVisual(stageKey: DashboardStageKey) {
     case 'kuyrukta':
     default:
       return {
-        textClass: 'text-slate-700',
-        barClass: 'bg-slate-400',
-        activeDotClass: 'border-slate-600 bg-slate-700 text-white',
-        icon: <Clock className="h-3.5 w-3.5 text-slate-500 shrink-0" aria-hidden="true" />,
+        textClass: 'text-zinc-400',
+        barClass: 'bg-zinc-600',
+        icon: <Clock className="h-3.5 w-3.5 text-zinc-400 shrink-0" aria-hidden="true" />,
       };
   }
 }
@@ -130,27 +122,27 @@ export function ProjectDashboard({
   projects,
   activeProjectId,
   batchQueue,
+  config,
   telemetry,
   onSelectAndOpenProject,
   onOpenProjectInColab,
   onCreateProject,
+  onImportClaudeBundle,
   onUpdateProjectDetails,
   onDeleteProject,
   onSetProjectStatus,
   onNavigate,
 }: ProjectDashboardProps) {
+  const bundleFolderInputRef = useRef<HTMLInputElement | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<DashboardFilterOption>('tumu');
   const [creatingNew, setCreatingNew] = useState(false);
   const [newName, setNewName] = useState('');
   const [newDesc, setNewDesc] = useState('');
+  const [newPreset, setNewPreset] = useState<DeliveryPresetId>('etsy_4_3');
   const [formError, setFormError] = useState<string | null>(null);
   const [brokenImageKeys, setBrokenImageKeys] = useState<Record<string, boolean>>({});
   const [activeLayerById, setActiveLayerById] = useState<Record<string, VisualLayerKey>>({});
-  const [hoveredStepById, setHoveredStepById] = useState<
-    Record<string, DashboardStageKey | null>
-  >({});
-  const [expandedDetailIds, setExpandedDetailIds] = useState<Record<string, boolean>>({});
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
   const [previewState, setPreviewState] = useState<{
     projectId: string;
@@ -208,7 +200,8 @@ export function ProjectDashboard({
     }
     onCreateProject(
       newName.trim(),
-      newDesc.trim() || 'ComfyUI + MiniMax H3 görsel video üretim projesi'
+      newDesc.trim() || 'Etsy / Sosyal Medya video üretim projesi',
+      newPreset
     );
     setNewName('');
     setNewDesc('');
@@ -216,33 +209,62 @@ export function ProjectDashboard({
     setCreatingNew(false);
   }
 
+  async function handleBundleFolderChange(e: ChangeEvent<HTMLInputElement>) {
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0 || !onImportClaudeBundle) return;
+    const rawInputs = await filesToRawInputs(fileList);
+    onImportClaudeBundle(rawInputs);
+    setCreatingNew(false);
+    e.target.value = '';
+  }
+
+  function handleLoadSampleEtsyBundle() {
+    if (!onImportClaudeBundle) return;
+    onImportClaudeBundle(createSampleEtsyClaudeBundleRawFiles('unrendered_blend'));
+    setCreatingNew(false);
+  }
+
   return (
     <section
       aria-labelledby="project-dashboard-heading"
-      className="mx-auto max-w-[1600px] px-4 py-6 lg:px-6 space-y-6"
+      className="relative mx-auto max-w-[1440px] px-4 py-9 lg:px-8 space-y-8"
     >
-      {/* Header Row */}
+      <input
+        ref={bundleFolderInputRef}
+        type="file"
+        multiple
+        // @ts-expect-error webkitdirectory is supported in Chromium/WebKit
+        webkitdirectory=""
+        className="hidden"
+        onChange={handleBundleFolderChange}
+      />
+      {/* Subtle Ambient Depth Behind Glass Cards */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none fixed inset-x-0 top-14 -z-10 h-[540px] bg-[radial-gradient(ellipse_55%_55%_at_18%_12%,rgba(10,132,255,0.11),transparent),radial-gradient(ellipse_45%_50%_at_82%_10%,rgba(191,90,242,0.07),transparent)]"
+      />
+
+      {/* Minimalist Apple Header */}
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div className="space-y-1">
           <h1
             id="project-dashboard-heading"
-            className="text-2xl font-bold tracking-tight text-slate-900 text-balance"
+            className="text-[32px] leading-tight font-medium tracking-[-0.03em] text-white/95 text-balance"
           >
             Projeler
           </h1>
-          <p className="text-sm text-slate-600">
-            Sahne önizlemelerini inceleyin, ilerleme çubuğu üzerinden üretim aşamasını yönetin ve stüdyoya geçin.
+          <p className="text-[14px] font-normal text-white/55">
+            Video sahnelerinizi önizleyin, stüdyoda düzenleyin veya üretimi başlatın.
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+        <div className="flex items-center gap-2.5 shrink-0">
           <button
             type="button"
-            onClick={() => onNavigate('colab')}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 hover:text-slate-900 whitespace-nowrap shrink-0"
+            onClick={() => onNavigate('workbench')}
+            className="rounded-full border border-white/[0.1] bg-white/[0.05] px-4 py-2 text-xs font-medium text-white/90 backdrop-blur-xl shadow-[0_8px_24px_-8px_rgba(0,0,0,0.6),inset_0_1px_0_0_rgba(255,255,255,0.08)] transition-all hover:bg-white/[0.1] whitespace-nowrap"
           >
-            <span>Üretim &amp; GPU Sırası</span>
-            <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+            Stüdyoyu Aç
           </button>
 
           <button
@@ -251,7 +273,7 @@ export function ProjectDashboard({
               setCreatingNew((v) => !v);
               setFormError(null);
             }}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700 whitespace-nowrap shrink-0"
+            className="inline-flex items-center gap-1.5 rounded-full bg-[#0A84FF] px-4 py-2 text-xs font-medium text-white shadow-[0_10px_26px_-6px_rgba(10,132,255,0.55),inset_0_1px_0_0_rgba(255,255,255,0.22)] transition-all hover:bg-[#2494FF] whitespace-nowrap"
           >
             <Plus className="h-3.5 w-3.5" aria-hidden="true" />
             <span>Yeni Proje</span>
@@ -259,9 +281,9 @@ export function ProjectDashboard({
         </div>
       </div>
 
-      {/* Inline Create Project Bar */}
+      {/* Inline Create & Claude Bundle Import Bar */}
       {creatingNew && (
-        <div className="rounded-xl border border-slate-200 bg-white p-4">
+        <div className="rounded-[28px] border border-white/[0.1] bg-white/[0.05] p-5 backdrop-blur-2xl shadow-[0_20px_50px_-16px_rgba(0,0,0,0.7),inset_0_1px_0_0_rgba(255,255,255,0.1)] space-y-3.5">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
             <div className="flex-1">
               <label htmlFor="dashboard-new-project-name" className="sr-only">
@@ -270,7 +292,7 @@ export function ProjectDashboard({
               <input
                 id="dashboard-new-project-name"
                 type="text"
-                placeholder="Proje adı (Örn: Otel Lobi Gece Sahnesi)"
+                placeholder="Proje adı (Örn: Seramik Kupa Etsy)"
                 value={newName}
                 onChange={(e) => {
                   setNewName(e.target.value);
@@ -279,7 +301,7 @@ export function ProjectDashboard({
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') handleCreateSubmit();
                 }}
-                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 placeholder:text-slate-400 focus:border-blue-600 focus:outline-none"
+                className="w-full rounded-2xl border border-white/[0.1] bg-black/35 px-4 py-2.5 text-xs text-white/95 placeholder:text-white/35 focus:border-[#0A84FF] focus:outline-none"
               />
             </div>
 
@@ -290,14 +312,31 @@ export function ProjectDashboard({
               <input
                 id="dashboard-new-project-desc"
                 type="text"
-                placeholder="Kısa sahne açıklaması (isteğe bağlı)"
+                placeholder="Kısa açıklama (isteğe bağlı)"
                 value={newDesc}
                 onChange={(e) => setNewDesc(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') handleCreateSubmit();
                 }}
-                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 placeholder:text-slate-400 focus:border-blue-600 focus:outline-none"
+                className="w-full rounded-2xl border border-white/[0.1] bg-black/35 px-4 py-2.5 text-xs text-white/95 placeholder:text-white/35 focus:border-[#0A84FF] focus:outline-none"
               />
+            </div>
+
+            <div>
+              <label htmlFor="dashboard-new-project-preset" className="sr-only">
+                Hedef format
+              </label>
+              <select
+                id="dashboard-new-project-preset"
+                value={newPreset}
+                onChange={(e) => setNewPreset(e.target.value as DeliveryPresetId)}
+                className="w-full rounded-2xl border border-white/[0.1] bg-black/45 px-3.5 py-2.5 text-xs text-white/95 focus:border-[#0A84FF] focus:outline-none sm:w-auto"
+              >
+                <option value="etsy_4_3">Etsy Vitrin (4:3)</option>
+                <option value="etsy_1_1">Etsy Kare (1:1)</option>
+                <option value="social_9_16">Sosyal Medya (9:16)</option>
+                <option value="cinema_16_9">Yatay Sahne (16:9)</option>
+              </select>
             </div>
 
             <div className="flex items-center gap-2 shrink-0">
@@ -307,32 +346,59 @@ export function ProjectDashboard({
                   setCreatingNew(false);
                   setFormError(null);
                 }}
-                className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-600 hover:text-slate-900 whitespace-nowrap"
+                className="rounded-full border border-white/[0.1] bg-white/[0.05] px-4 py-2 text-xs font-medium text-white/75 hover:text-white whitespace-nowrap"
               >
                 İptal
               </button>
               <button
                 type="button"
                 onClick={handleCreateSubmit}
-                className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700 whitespace-nowrap"
+                className="rounded-full bg-[#0A84FF] px-4 py-2 text-xs font-medium text-white hover:bg-[#2494FF] whitespace-nowrap"
               >
-                Proje Oluştur
+                Oluştur
               </button>
             </div>
           </div>
 
+          {onImportClaudeBundle && (
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-white/[0.08] pt-3 text-xs">
+              <span className="text-white/50">
+                Claude klasörü (.blend, ilk/son kare ve prompt) doğrudan otomatik tanınır.
+              </span>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => bundleFolderInputRef.current?.click()}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-white/[0.12] bg-white/[0.06] px-3.5 py-1.5 text-xs font-medium text-white/90 hover:bg-white/[0.12] whitespace-nowrap"
+                >
+                  <FolderOpen className="h-3.5 w-3.5 text-[#0A84FF]" aria-hidden="true" />
+                  <span>Claude Klasörü Yükle</span>
+                </button>
+                <button
+                  type="button"
+                  data-testid="load-sample-etsy-bundle-btn"
+                  onClick={handleLoadSampleEtsyBundle}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-[#0A84FF]/35 bg-[#0A84FF]/15 px-3.5 py-1.5 text-xs font-medium text-[#64B5FF] hover:bg-[#0A84FF]/25 whitespace-nowrap"
+                >
+                  <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Örnek Etsy Paketi (.blend)</span>
+                </button>
+              </div>
+            </div>
+          )}
+
           {formError && (
-            <p className="mt-2 text-xs font-medium text-rose-600">{formError}</p>
+            <p className="mt-1 text-xs font-medium text-[#FF453A]">{formError}</p>
           )}
         </div>
       )}
 
-      {/* Filter & Search Toolbar */}
-      <div className="flex flex-col gap-3 border-y border-slate-200 py-3 sm:flex-row sm:items-center sm:justify-between">
+      {/* Glass Filter & Search Row */}
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div
           role="tablist"
           aria-label="Üretim durumu filtresi"
-          className="inline-flex w-full overflow-x-auto rounded-lg bg-slate-100 p-1 sm:w-auto"
+          className="inline-flex w-full overflow-x-auto rounded-full border border-white/[0.1] bg-white/[0.045] p-1 backdrop-blur-2xl shadow-[0_12px_32px_-12px_rgba(0,0,0,0.65),inset_0_1px_0_0_rgba(255,255,255,0.08)] sm:w-auto"
         >
           {FILTER_OPTIONS.map((option) => {
             const isSelected = statusFilter === option.id;
@@ -343,14 +409,14 @@ export function ProjectDashboard({
                 role="tab"
                 aria-selected={isSelected}
                 onClick={() => setStatusFilter(option.id)}
-                className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                className={`rounded-full px-3.5 py-1.5 text-xs font-medium transition-all whitespace-nowrap shrink-0 ${
                   isSelected
-                    ? 'bg-white text-slate-900 shadow-xs font-semibold'
-                    : 'text-slate-600 hover:text-slate-900'
+                    ? 'bg-white/[0.14] text-white shadow-[0_2px_10px_-2px_rgba(0,0,0,0.4)]'
+                    : 'text-white/55 hover:text-white/85'
                 }`}
               >
                 <span>{option.label}</span>
-                <span className="ml-1.5 text-[11px] text-slate-400 tabular-nums">
+                <span className="ml-1.5 text-[11px] text-white/40 tabular-nums">
                   {counts[option.id]}
                 </span>
               </button>
@@ -358,50 +424,40 @@ export function ProjectDashboard({
           })}
         </div>
 
-        <div className="flex items-center gap-4">
-          <div className="hidden items-center gap-2 text-xs text-slate-500 tabular-nums lg:flex">
-            <span>{counts.tumu} proje</span>
-            <span aria-hidden="true">·</span>
-            <span>{counts.isleniyor} işleniyor</span>
-            <span aria-hidden="true">·</span>
-            <span>{counts.tamamlandi} tamamlandı</span>
-          </div>
-
-          <div className="relative w-full sm:w-64">
-            <Search
-              className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400"
-              aria-hidden="true"
-            />
-            <input
-              type="search"
-              aria-label="Projelerde ara"
-              placeholder="Proje ara..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full rounded-lg border border-slate-200 bg-white py-1.5 pl-8 pr-8 text-xs text-slate-900 placeholder:text-slate-400 focus:border-blue-600 focus:outline-none"
-            />
-            {searchQuery && (
-              <button
-                type="button"
-                aria-label="Aramayı temizle"
-                onClick={() => setSearchQuery('')}
-                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-slate-400 hover:text-slate-700"
-              >
-                <X className="h-3.5 w-3.5" aria-hidden="true" />
-              </button>
-            )}
-          </div>
+        <div className="relative w-full sm:w-64">
+          <Search
+            className="pointer-events-none absolute left-3.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-white/40"
+            aria-hidden="true"
+          />
+          <input
+            type="search"
+            aria-label="Projelerde ara"
+            placeholder="Proje ara..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="w-full rounded-full border border-white/[0.1] bg-white/[0.045] py-2 pl-9 pr-9 text-xs text-white/95 backdrop-blur-2xl shadow-[0_12px_32px_-12px_rgba(0,0,0,0.65),inset_0_1px_0_0_rgba(255,255,255,0.08)] placeholder:text-white/40 focus:border-[#0A84FF] focus:outline-none"
+          />
+          {searchQuery && (
+            <button
+              type="button"
+              aria-label="Aramayı temizle"
+              onClick={() => setSearchQuery('')}
+              className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full p-0.5 text-white/45 hover:text-white"
+            >
+              <X className="h-3.5 w-3.5" aria-hidden="true" />
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Visual-First Project Cards Grid */}
+      {/* Glassmorphic Apple Card Grid */}
       {filteredProjects.length === 0 ? (
-        <div className="rounded-xl border border-slate-200 bg-white px-6 py-12 text-center">
-          <p className="text-sm font-semibold text-slate-900">
+        <div className="rounded-[32px] border border-white/[0.1] bg-white/[0.045] px-6 py-16 text-center backdrop-blur-2xl shadow-[0_24px_56px_-16px_rgba(0,0,0,0.7),inset_0_1px_0_0_rgba(255,255,255,0.1)]">
+          <p className="text-sm font-medium text-white/90">
             Seçili filtreyle eşleşen proje bulunamadı.
           </p>
-          <p className="mt-1 text-xs text-slate-500">
-            Filtreyi sıfırlayabilir veya yeni bir video üretim projesi oluşturabilirsiniz.
+          <p className="mt-1 text-xs text-white/50">
+            Filtreyi temizleyebilir veya yeni bir proje oluşturabilirsiniz.
           </p>
           <div className="mt-4 flex items-center justify-center gap-2.5">
             {(searchQuery || statusFilter !== 'tumu') && (
@@ -411,7 +467,7 @@ export function ProjectDashboard({
                   setSearchQuery('');
                   setStatusFilter('tumu');
                 }}
-                className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                className="rounded-full border border-white/[0.1] bg-white/[0.06] px-4 py-2 text-xs font-medium text-white/85 hover:bg-white/[0.12]"
               >
                 Filtreleri Temizle
               </button>
@@ -419,7 +475,7 @@ export function ProjectDashboard({
             <button
               type="button"
               onClick={() => setCreatingNew(true)}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-700"
+              className="inline-flex items-center gap-1.5 rounded-full bg-[#0A84FF] px-4 py-2 text-xs font-medium text-white hover:bg-[#2494FF]"
             >
               <Plus className="h-3.5 w-3.5" aria-hidden="true" />
               <span>Yeni Proje</span>
@@ -429,21 +485,14 @@ export function ProjectDashboard({
       ) : (
         <div
           data-testid="project-dashboard-grid"
-          className="grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-3"
+          className="grid grid-cols-1 gap-7 md:grid-cols-2 xl:grid-cols-3"
         >
           {filteredProjects.map((project) => {
             const summary = progressById[project.id];
-            const hoveredStage = hoveredStepById[project.id] ?? null;
-            const previewStep = hoveredStage
-              ? PIPELINE_STEPS.find((s) => s.key === hoveredStage) ?? null
-              : null;
-
-            const activeStageKey = previewStep ? previewStep.key : summary.stageKey;
-            const displayedPct = previewStep ? previewStep.pct : summary.progressPct;
-            const displayedLabel = previewStep ? previewStep.fullLabel : summary.statusLabel;
-            const visual = getStageVisual(activeStageKey);
-
+            const visual = getStageVisual(summary.stageKey);
             const seedVisuals = getSeedVisualForProject(project.id);
+            const readiness = inspectProjectPipelineReadiness(project, config.blenderRender);
+
             const grayboxAsset = project.assets.find(
               (a) =>
                 a.kind === 'blender_graybox' && !isVideoAssetName(a.name, a.mimeType)
@@ -455,46 +504,48 @@ export function ProjectDashboard({
 
             const layerUrls: Record<VisualLayerKey, string> = {
               final: project.outputs[0]?.objectUrl || seedVisuals.finalPreview,
-              graybox: grayboxAsset?.objectUrl || seedVisuals.grayboxPreview,
-              style: styleAsset?.objectUrl || seedVisuals.stylePreview,
+              graybox:
+                readiness.firstFrameAsset?.objectUrl ||
+                grayboxAsset?.objectUrl ||
+                seedVisuals.grayboxPreview,
+              style:
+                readiness.lastFrameAsset?.objectUrl ||
+                styleAsset?.objectUrl ||
+                seedVisuals.stylePreview,
             };
 
             const activeLayer = activeLayerById[project.id] ?? 'final';
             const heroUrl = layerUrls[activeLayer];
             const heroBrokenKey = `${project.id}-${activeLayer}`;
             const isSelected = project.id === activeProjectId;
-            const activeStepIndex = PIPELINE_STEPS.findIndex(
-              (s) => s.key === activeStageKey
-            );
             const barWidthPct =
-              activeStageKey === 'isleniyor' || activeStageKey === 'hazirlaniyor'
-                ? Math.max(displayedPct, 14)
-                : displayedPct;
-            const isExpanded = !!expandedDetailIds[project.id];
+              summary.stageKey === 'isleniyor' || summary.stageKey === 'hazirlaniyor'
+                ? Math.max(summary.progressPct, 14)
+                : summary.progressPct;
 
             const layerSpecs: { key: VisualLayerKey; label: string }[] = [
               { key: 'final', label: 'Final' },
               { key: 'graybox', label: 'Graybox' },
-              { key: 'style', label: 'Stil Ref' },
+              { key: 'style', label: 'Stil' },
             ];
 
             return (
               <article
                 key={project.id}
                 data-testid={`project-card-${project.id}`}
-                className={`flex flex-col overflow-hidden rounded-xl border bg-white transition-colors ${
+                className={`group/card flex flex-col rounded-[32px] border bg-white/[0.045] p-3 backdrop-blur-2xl backdrop-saturate-150 transition-all duration-300 ease-out hover:-translate-y-0.5 motion-reduce:transform-none ${
                   isSelected
-                    ? 'border-blue-500 ring-1 ring-blue-500/20'
-                    : 'border-slate-200 hover:border-slate-300'
+                    ? 'border-[#0A84FF]/45 ring-1 ring-[#0A84FF]/25 shadow-[0_26px_60px_-14px_rgba(10,132,255,0.22),0_18px_40px_-14px_rgba(0,0,0,0.72),inset_0_1px_0_0_rgba(255,255,255,0.16)]'
+                    : 'border-white/[0.1] shadow-[0_24px_56px_-16px_rgba(0,0,0,0.68),0_4px_16px_-4px_rgba(0,0,0,0.35),inset_0_1px_0_0_rgba(255,255,255,0.12)] hover:border-white/[0.18] hover:bg-white/[0.06] hover:shadow-[0_30px_64px_-14px_rgba(0,0,0,0.8),inset_0_1px_0_0_rgba(255,255,255,0.16)]'
                 }`}
               >
-                {/* Dominant 16:10 Visual Hero Stage with Measured Bottom Contrast Scrim */}
-                <div className="relative aspect-[16/10] w-full overflow-hidden bg-slate-900">
+                {/* Ultra-Rounded Inset Cinema Preview */}
+                <div className="relative aspect-[16/10] w-full overflow-hidden rounded-[22px] bg-black/60 ring-1 ring-white/[0.09]">
                   <button
                     type="button"
                     onClick={() => onSelectAndOpenProject(project.id)}
                     aria-label={`${project.name} projesini stüdyoda aç`}
-                    className="group relative block h-full w-full text-left focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-blue-400"
+                    className="group relative block h-full w-full text-left focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[#0A84FF]"
                   >
                     {heroUrl && !brokenImageKeys[heroBrokenKey] ? (
                       <img
@@ -507,285 +558,163 @@ export function ProjectDashboard({
                             [heroBrokenKey]: true,
                           }))
                         }
-                        className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02] motion-reduce:transform-none"
+                        className="h-full w-full object-cover transition-transform duration-500 ease-out group-hover/card:scale-[1.03] motion-reduce:transform-none"
                       />
                     ) : (
-                      <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-slate-800 text-slate-300">
+                      <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-black/40 text-white/45">
                         <Film className="h-7 w-7" aria-hidden="true" />
                         <span className="text-xs font-medium">{project.name}</span>
                       </div>
                     )}
 
-                    {/* Measured Gradient Scrim for >= 4.5:1 Contrast */}
                     <div
                       aria-hidden="true"
-                      className="pointer-events-none absolute inset-x-0 bottom-0 h-28 bg-gradient-to-t from-slate-950/90 via-slate-950/45 to-transparent"
+                      className="pointer-events-none absolute inset-x-0 bottom-0 h-24 bg-gradient-to-t from-black/70 via-black/20 to-transparent"
                     />
+                  </button>
 
-                    <div className="pointer-events-none absolute inset-x-0 bottom-0 p-4 text-white">
-                      <div className="flex items-center gap-1.5 text-[11px] font-medium text-slate-200/90 tabular-nums">
-                        <span>{GPU_POLICY_LABELS[project.targetGpuPolicy]}</span>
-                        <span aria-hidden="true">·</span>
-                        <span>{project.assets.length} dosya</span>
-                        <span aria-hidden="true">·</span>
-                        <span>{project.updatedAt}</span>
-                      </div>
-                      <h2 className="mt-0.5 truncate text-lg font-bold tracking-tight text-white">
+                  {/* Frosted Glass Layer Switcher Pill */}
+                  <div
+                    role="group"
+                    aria-label={`${project.name} görsel katmanları`}
+                    className="absolute bottom-3 left-3 inline-flex items-center rounded-full border border-white/20 bg-black/45 p-0.5 shadow-[0_8px_20px_-4px_rgba(0,0,0,0.5)] backdrop-blur-2xl"
+                  >
+                    {layerSpecs.map((layer) => {
+                      const isLayerActive = activeLayer === layer.key;
+                      return (
+                        <button
+                          key={layer.key}
+                          type="button"
+                          aria-pressed={isLayerActive}
+                          onClick={() =>
+                            setActiveLayerById((prev) => ({
+                              ...prev,
+                              [project.id]: layer.key,
+                            }))
+                          }
+                          className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition-all ${
+                            isLayerActive
+                              ? 'bg-white/95 text-black font-semibold shadow-sm'
+                              : 'text-white/80 hover:text-white'
+                          }`}
+                        >
+                          {layer.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Minimalist Typography & Airy Card Body */}
+                <div className="flex flex-1 flex-col justify-between gap-4 px-3.5 pb-2.5 pt-4">
+                  <div className="space-y-1">
+                    <div className="flex items-baseline justify-between gap-3">
+                      <h2 className="truncate text-[17px] leading-snug font-medium tracking-[-0.02em] text-white/95">
                         {project.name}
                       </h2>
+                      <span className="shrink-0 text-[11px] font-medium tracking-wide text-white/40 tabular-nums">
+                        {readiness.deliveryPreset.shortLabel}
+                        {readiness.requiresColabBlenderRender ? ' · .blend' : ''} ·{' '}
+                        {project.targetGpuPolicy === '80GB_ONLY' ? '80GB' : '40/80GB'}
+                      </span>
                     </div>
-                  </button>
-                </div>
+                    <p className="line-clamp-1 text-[13px] font-normal text-white/50">
+                      {project.description}
+                    </p>
+                  </div>
 
-                {/* 3-Frame Visual Layer Strip (Final / 3D Graybox / Stil Ref) */}
-                <div
-                  role="group"
-                  aria-label={`${project.name} görsel katmanları`}
-                  className="grid grid-cols-3 gap-2 border-b border-slate-100 bg-slate-50/70 px-4 py-2.5"
-                >
-                  {layerSpecs.map((layer) => {
-                    const isLayerActive = activeLayer === layer.key;
-                    const thumbKey = `${project.id}-thumb-${layer.key}`;
-                    return (
-                      <button
-                        key={layer.key}
-                        type="button"
-                        aria-pressed={isLayerActive}
-                        onClick={() =>
-                          setActiveLayerById((prev) => ({
-                            ...prev,
-                            [project.id]: layer.key,
-                          }))
-                        }
-                        className={`flex items-center gap-2 rounded-lg p-1 text-left transition-colors ${
-                          isLayerActive
-                            ? 'bg-white text-slate-900 ring-1 ring-blue-600 shadow-xs'
-                            : 'text-slate-600 hover:bg-white/80 hover:text-slate-900'
-                        }`}
-                      >
-                        <div className="h-7 w-10 shrink-0 overflow-hidden rounded bg-slate-200">
-                          {layerUrls[layer.key] && !brokenImageKeys[thumbKey] ? (
-                            <img
-                              src={layerUrls[layer.key]}
-                              alt={layer.label}
-                              referrerPolicy="no-referrer"
-                              onError={() =>
-                                setBrokenImageKeys((prev) => ({
-                                  ...prev,
-                                  [thumbKey]: true,
-                                }))
-                              }
-                              className="h-full w-full object-cover"
-                            />
-                          ) : (
-                            <div className="flex h-full w-full items-center justify-center text-slate-400">
-                              <Film className="h-3 w-3" aria-hidden="true" />
-                            </div>
-                          )}
-                        </div>
-                        <span className="truncate text-[11px] font-semibold">
-                          {layer.label}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-
-                {/* Card Body: Description + Interactive Pipeline Progress Bar */}
-                <div className="flex flex-1 flex-col justify-between gap-4 p-5">
-                  <p className="line-clamp-2 min-h-[2.25rem] text-xs leading-relaxed text-slate-600">
-                    {project.description}
-                  </p>
-
-                  {/* Interactive Progress Bar & Stage Selector */}
-                  <div className="space-y-2.5">
-                    <div className="flex items-center justify-between gap-2">
+                  {/* Minimalist Status & Slim Progress Line */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-xs">
                       <span
-                        className={`inline-flex items-center gap-1.5 text-xs font-semibold ${visual.textClass}`}
+                        className={`inline-flex items-center gap-1.5 font-medium ${visual.textClass}`}
                       >
                         {visual.icon}
-                        <span>{displayedLabel}</span>
-                        {previewStep && previewStep.key !== summary.stageKey && (
-                          <span className="text-[11px] font-normal text-slate-400">
-                            (seçmek için tıklayın)
-                          </span>
-                        )}
+                        <span>{summary.statusLabel}</span>
                       </span>
-
-                      <span
-                        className={`font-mono text-xs font-semibold tabular-nums ${visual.textClass}`}
-                      >
-                        %{displayedPct}
+                      <span className="text-[11px] font-medium text-white/45 tabular-nums">
+                        %{summary.progressPct}
                       </span>
                     </div>
 
-                    {/* Visual Progress Track */}
                     <div
                       role="progressbar"
                       aria-label={`${project.name} üretim ilerlemesi`}
                       aria-valuemin={0}
                       aria-valuemax={100}
                       aria-valuenow={summary.progressPct}
-                      className="h-2.5 w-full overflow-hidden rounded-full bg-slate-100"
+                      className="h-1 w-full overflow-hidden rounded-full bg-white/[0.08]"
                     >
                       <div
-                        className={`h-full rounded-full transition-all duration-200 ${visual.barClass}`}
+                        className={`h-full rounded-full transition-all duration-300 ${visual.barClass}`}
                         style={{ width: `${barWidthPct}%` }}
                       />
                     </div>
-
-                    {/* Interactive 4-Step Stage Bar */}
-                    <div
-                      role="group"
-                      aria-label={`${project.name} üretim aşaması seçici`}
-                      onMouseLeave={() =>
-                        setHoveredStepById((prev) => ({
-                          ...prev,
-                          [project.id]: null,
-                        }))
-                      }
-                      className="grid grid-cols-4 gap-1"
-                    >
-                      {PIPELINE_STEPS.map((step, idx) => {
-                        const isCurrentStep = summary.stageKey === step.key;
-                        const isReached = idx <= activeStepIndex;
-                        return (
-                          <button
-                            key={step.key}
-                            type="button"
-                            aria-pressed={isCurrentStep}
-                            onMouseEnter={() =>
-                              setHoveredStepById((prev) => ({
-                                ...prev,
-                                [project.id]: step.key,
-                              }))
-                            }
-                            onFocus={() =>
-                              setHoveredStepById((prev) => ({
-                                ...prev,
-                                [project.id]: step.key,
-                              }))
-                            }
-                            onBlur={() =>
-                              setHoveredStepById((prev) => ({
-                                ...prev,
-                                [project.id]: null,
-                              }))
-                            }
-                            onClick={() => onSetProjectStatus(project.id, step.key)}
-                            className={`flex items-center justify-center gap-1 rounded-md px-1.5 py-1.5 text-[11px] font-medium transition-colors whitespace-nowrap ${
-                              isCurrentStep
-                                ? 'bg-slate-900 text-white font-semibold'
-                                : isReached
-                                  ? 'bg-slate-100 text-slate-800 hover:bg-slate-200'
-                                  : 'text-slate-500 hover:bg-slate-100 hover:text-slate-900'
-                            }`}
-                          >
-                            <span>{step.shortLabel}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-
-                    <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500">
-                      <span className="truncate">{summary.stageDetail}</span>
-                      <button
-                        type="button"
-                        aria-expanded={isExpanded}
-                        onClick={() =>
-                          setExpandedDetailIds((prev) => ({
-                            ...prev,
-                            [project.id]: !prev[project.id],
-                          }))
-                        }
-                        className="inline-flex shrink-0 items-center gap-1 font-medium text-slate-600 hover:text-slate-900 tabular-nums"
-                      >
-                        <span>
-                          Hazırlık {summary.readinessCount}/{summary.readinessTotal}
-                        </span>
-                        {isExpanded ? (
-                          <ChevronUp className="h-3 w-3" aria-hidden="true" />
-                        ) : (
-                          <ChevronDown className="h-3 w-3" aria-hidden="true" />
-                        )}
-                      </button>
-                    </div>
-
-                    {isExpanded && (
-                      <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 border-t border-slate-100 pt-2.5 text-[11px]">
-                        {summary.readinessItems.map((item) => (
-                          <div
-                            key={item.id}
-                            className="flex items-center gap-1.5 text-slate-600"
-                          >
-                            {item.ready ? (
-                              <Check
-                                className="h-3 w-3 text-emerald-600 shrink-0"
-                                aria-hidden="true"
-                              />
-                            ) : (
-                              <Clock
-                                className="h-3 w-3 text-amber-500 shrink-0"
-                                aria-hidden="true"
-                              />
-                            )}
-                            <span className={item.ready ? 'text-slate-800' : 'text-slate-500'}>
-                              {item.label}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
                   </div>
 
-                  {/* Card Action Menu: Başlat / Detayları Düzenle / Hızlı İzle */}
+                  {/* Clean Action Pills */}
                   <div
                     role="group"
                     aria-label={`${project.name} aksiyon menüsü`}
-                    className="flex flex-wrap items-center gap-1.5 border-t border-slate-100 pt-3.5"
+                    className="flex items-center justify-between gap-2 pt-0.5"
                   >
-                    <button
-                      type="button"
-                      onClick={() => handleStartProject(project.id)}
-                      className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-slate-800 whitespace-nowrap"
-                    >
-                      <Play className="h-3 w-3 fill-current" aria-hidden="true" />
-                      <span>Başlat</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setEditingProjectId(project.id)}
-                      className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 hover:text-slate-900 whitespace-nowrap"
-                    >
-                      <Pencil className="h-3 w-3 text-slate-500" aria-hidden="true" />
-                      <span>Detayları Düzenle</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setPreviewState({
-                          projectId: project.id,
-                          layer: activeLayer,
-                        })
-                      }
-                      className="inline-flex min-h-[34px] items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 hover:text-slate-900 whitespace-nowrap"
-                    >
-                      <Eye className="h-3 w-3 text-slate-500" aria-hidden="true" />
-                      <span>Hızlı İzle</span>
-                    </button>
-
-                    {projects.length > 1 && (
+                    <div className="flex items-center gap-2">
                       <button
                         type="button"
-                        aria-label={`${project.name} projesini sil`}
-                        onClick={() => onDeleteProject(project.id)}
-                        className="ml-auto inline-flex min-h-[34px] items-center justify-center rounded-lg border border-slate-200 bg-white p-2 text-slate-400 transition-colors hover:border-rose-200 hover:bg-rose-50 hover:text-rose-600"
+                        onClick={() => onSelectAndOpenProject(project.id)}
+                        className="rounded-full bg-[#0A84FF] px-4 py-1.5 text-xs font-medium text-white shadow-[0_6px_18px_-4px_rgba(10,132,255,0.5),inset_0_1px_0_0_rgba(255,255,255,0.2)] transition-all hover:bg-[#2494FF] whitespace-nowrap"
                       >
-                        <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                        Stüdyoda Aç
                       </button>
-                    )}
+
+                      <button
+                        type="button"
+                        onClick={() => handleStartProject(project.id)}
+                        className="inline-flex items-center gap-1.5 rounded-full border border-white/[0.1] bg-white/[0.06] px-3.5 py-1.5 text-xs font-medium text-white/90 backdrop-blur-md transition-colors hover:bg-white/[0.12] whitespace-nowrap"
+                      >
+                        <Play className="h-3 w-3 fill-current" aria-hidden="true" />
+                        <span>Başlat</span>
+                      </button>
+                    </div>
+
+                    <div className="flex items-center gap-0.5">
+                      <button
+                        type="button"
+                        aria-label={`${project.name} hızlı izle`}
+                        title="Hızlı İzle"
+                        onClick={() =>
+                          setPreviewState({
+                            projectId: project.id,
+                            layer: activeLayer,
+                          })
+                        }
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-full text-white/45 transition-colors hover:bg-white/[0.09] hover:text-white"
+                      >
+                        <Eye className="h-3.5 w-3.5" aria-hidden="true" />
+                      </button>
+
+                      <button
+                        type="button"
+                        aria-label={`${project.name} düzenle`}
+                        title="Düzenle"
+                        onClick={() => setEditingProjectId(project.id)}
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-full text-white/45 transition-colors hover:bg-white/[0.09] hover:text-white"
+                      >
+                        <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                      </button>
+
+                      {projects.length > 1 && (
+                        <button
+                          type="button"
+                          aria-label={`${project.name} projesini sil`}
+                          title="Sil"
+                          onClick={() => onDeleteProject(project.id)}
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-full text-white/45 transition-colors hover:bg-[#FF453A]/15 hover:text-[#FF453A]"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
               </article>
@@ -793,6 +722,16 @@ export function ProjectDashboard({
           })}
         </div>
       )}
+
+      {/* Quiet Render Throughput Analytics Below Gallery */}
+      <RenderThroughputPanel
+        batchQueue={batchQueue}
+        projects={projects}
+        config={config}
+        telemetry={telemetry}
+        onOpenProject={onSelectAndOpenProject}
+        onNavigate={onNavigate}
+      />
 
       <ProjectEditModal
         project={editingProject}

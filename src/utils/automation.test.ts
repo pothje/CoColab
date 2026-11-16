@@ -743,6 +743,328 @@ test('BatchQueue scheduler evaluates calendar time, low system load, combined mo
   assert.ok(cell5.includes('SCHEDULE_CONFIG'));
 });
 
+import {
+  buildRenderThroughputReport,
+  computeA100EfficiencyProfile,
+  estimateJobActualRenderMin,
+} from './renderThroughput';
+import {
+  classifyAllocatedVramTier,
+  evaluateGpuHealthCheck,
+} from './gpuHealthCheck';
+import {
+  buildStudioTimelineModel,
+  computeTimelineClipStyle,
+  formatTimecode,
+  stepFrameTime,
+} from './studioTimeline';
 
+test('Render Throughput computes dynamic A100 efficiency targets and batch compliance metrics', () => {
+  const projects = createInitialProjects(DEFAULT_AUTOMATION_CONFIG.workspaceRoot);
+  const queue = createInitialBatchQueue(projects);
 
+  // 1. Default 80GB High-VRAM + SageAttention config (minimax-h3): 3.2 * 0.88 = 2.8 dk
+  const baseProfile = computeA100EfficiencyProfile(DEFAULT_AUTOMATION_CONFIG, 'auto');
+  assert.equal(baseProfile.effectiveTier, '80GB');
+  assert.equal(baseProfile.targetRenderMin, 2.8);
+  assert.ok(baseProfile.activeOptimizations.includes('--highvram'));
+  assert.ok(baseProfile.activeOptimizations.includes('SageAttention'));
 
+  // 2. Enabling TeaCache + 8-Step Turbo LoRA tightens the A100 target threshold
+  const turboConfig = {
+    ...DEFAULT_AUTOMATION_CONFIG,
+    comfyui: {
+      ...DEFAULT_AUTOMATION_CONFIG.comfyui,
+      enableTeaCache: true,
+      enableTurboLora: true,
+      turboSteps: 8,
+    },
+  };
+  const turboProfile = computeA100EfficiencyProfile(turboConfig, '80GB');
+  assert.ok(turboProfile.targetRenderMin < baseProfile.targetRenderMin);
+  assert.equal(turboProfile.targetRenderMin, 1.5);
+  assert.ok(turboProfile.activeOptimizations.includes('TeaCache'));
+  assert.ok(turboProfile.activeOptimizations.includes('8-Step Turbo LoRA'));
+
+  // 3. 40GB offload tier relaxes the target threshold compared to 80GB High-VRAM
+  const profile40 = computeA100EfficiencyProfile(DEFAULT_AUTOMATION_CONFIG, '40GB');
+  assert.equal(profile40.effectiveTier, '40GB');
+  assert.equal(profile40.targetRenderMin, 3.8);
+
+  // 4. Full throughput report on seed queue against 80GB default target (2.8 dk):
+  //    Job 0 (tamamlandi, 2.6 dk) => on_target
+  //    Job 1 (isleniyor, 3.9 dk) => over_target
+  //    Job 2 (kuyrukta, null) => queued
+  const report = buildRenderThroughputReport(queue, projects, DEFAULT_AUTOMATION_CONFIG, '80GB');
+  assert.equal(report.totalJobs, 3);
+  assert.equal(report.measuredJobsCount, 2);
+  assert.equal(report.onTargetCount, 1);
+  assert.equal(report.overTargetCount, 1);
+  assert.equal(report.queuedCount, 1);
+  assert.equal(report.targetCompliancePct, 50);
+  assert.equal(report.avgActualMin, 3.3);
+  assert.equal(report.items[0].complianceState, 'on_target');
+  assert.equal(report.items[1].complianceState, 'over_target');
+  assert.equal(report.items[2].complianceState, 'queued');
+
+  // 5. Fallback estimation works cleanly for newly completed jobs without explicit actualRenderMin
+  assert.equal(
+    estimateJobActualRenderMin({ ...queue[2], actualRenderMin: null }, 'tamamlandi'),
+    2.7
+  );
+  assert.equal(
+    estimateJobActualRenderMin({ ...queue[2], actualRenderMin: null }, 'kuyrukta'),
+    null
+  );
+});
+
+test('GPU Health Check compares allocated VRAM (40GB/80GB/24GB) against selected project tier and triggers alert on mismatch', () => {
+  const projects = createInitialProjects(DEFAULT_AUTOMATION_CONFIG.workspaceRoot);
+  const flexibleProject = projects[0]; // 80GB_OR_40GB
+  const strict80Project = { ...projects[2], targetGpuPolicy: '80GB_ONLY' as const };
+
+  assert.equal(classifyAllocatedVramTier(80), '80GB');
+  assert.equal(classifyAllocatedVramTier(40), '40GB');
+  assert.equal(classifyAllocatedVramTier(24), '24GB');
+  assert.equal(classifyAllocatedVramTier(null), 'unknown');
+
+  const baseTelemetry = {
+    sessionId: 'sess-hc-1',
+    stage: 'preflight' as const,
+    gpuName: 'NVIDIA A100-SXM4-40GB',
+    vramUsedGb: 2.1,
+    vramTotalGb: 40,
+    systemRamUsedGb: 16.2,
+    systemRamTotalGb: 83.5,
+    gpuTempC: 39,
+    diskFreeGb: 166,
+    downloadProgressPct: 100,
+    activeProjectId: strict80Project.id,
+    activeBatchJobId: null,
+    batchIndex: 0,
+    batchTotal: 1,
+    currentStepLabel: 'Connected',
+    lastUpdatedAt: '2026-11-16T10:00:00Z',
+    logs: [],
+  };
+
+  // Pending when disconnected
+  const pendingRes = evaluateGpuHealthCheck(
+    strict80Project,
+    { ...baseTelemetry, vramTotalGb: null, gpuName: null },
+    DEFAULT_AUTOMATION_CONFIG
+  );
+  assert.equal(pendingRes.status, 'pending');
+  assert.equal(pendingRes.shouldAlert, false);
+
+  // Mismatch alert when 40GB allocated for an 80GB_ONLY project
+  const mismatch40on80 = evaluateGpuHealthCheck(
+    strict80Project,
+    baseTelemetry,
+    DEFAULT_AUTOMATION_CONFIG
+  );
+  assert.equal(mismatch40on80.status, 'mismatch');
+  assert.equal(mismatch40on80.shouldAlert, true);
+  assert.equal(mismatch40on80.canRelaxPolicyTo40Gb, true);
+
+  // Healthy when same 40GB runtime is used with an 80GB_OR_40GB project
+  const healthy40onFlex = evaluateGpuHealthCheck(
+    flexibleProject,
+    baseTelemetry,
+    DEFAULT_AUTOMATION_CONFIG
+  );
+  assert.equal(healthy40onFlex.status, 'healthy');
+  assert.equal(healthy40onFlex.shouldAlert, false);
+
+  // Critical alert when L4 24GB is assigned
+  const criticalL4 = evaluateGpuHealthCheck(
+    flexibleProject,
+    { ...baseTelemetry, gpuName: 'NVIDIA L4', vramTotalGb: 24, systemRamTotalGb: 53 },
+    DEFAULT_AUTOMATION_CONFIG
+  );
+  assert.equal(criticalL4.status, 'critical');
+  assert.equal(criticalL4.shouldAlert, true);
+  assert.equal(criticalL4.canRelaxPolicyTo40Gb, false);
+});
+
+test('NLE Studio Timeline utilities format 24fps timecode, step frames, and map multi-track clips', () => {
+  assert.equal(formatTimecode(0, 24), '00:00:00:00');
+  assert.equal(formatTimecode(2.5, 24), '00:00:02:12');
+  assert.equal(formatTimecode(65.25, 24), '00:01:05:06');
+
+  const steppedForward = stepFrameTime(2.0, 1, 10, 24);
+  assert.ok(steppedForward > 2.0 && steppedForward < 2.05);
+  assert.equal(stepFrameTime(0.01, -5, 10, 24), 0);
+
+  const projects = createInitialProjects(DEFAULT_AUTOMATION_CONFIG.workspaceRoot);
+  const queue = createInitialBatchQueue(projects);
+  const timeline = buildStudioTimelineModel(projects[0], queue, 24);
+  assert.ok(timeline.totalDurationSec >= 10);
+  assert.ok(timeline.videoClips.length >= 1);
+  assert.ok(timeline.grayboxClips.length >= 1);
+  assert.ok(timeline.referenceClips.length >= 1);
+
+  const style = computeTimelineClipStyle({ startSec: 0, durationSec: 5 }, 10);
+  assert.equal(style.leftPct, 0);
+  assert.equal(style.widthPct, 50);
+});
+
+import { inferMediaRole } from './guardrailEngine';
+import {
+  createSampleEtsyClaudeBundleRawFiles,
+  inferDeliveryPresetFromMetadata,
+  inspectProjectPipelineReadiness,
+  parseClaudeBundleToProject,
+} from './claudeBundle';
+import {
+  buildBlenderRenderHelperPython,
+  DEFAULT_BLENDER_RENDER_CONFIG,
+} from './blenderModule';
+
+test('Claude Bundle parser, First/Last Frame role detection, Blender OptiX module, and Etsy/Social presets work end-to-end', async () => {
+  // 1. inferMediaRole distinguishes .blend, first_frame, last_frame, pre-rendered mp4, and style_ref
+  assert.equal(
+    inferMediaRole('04_assets/blender_graybox/urun.blend', 'urun.blend', 'blender_graybox'),
+    'blender_scene'
+  );
+  assert.equal(
+    inferMediaRole('04_assets/references/first_frame_masa.png', 'first_frame_masa.png', 'reference_media'),
+    'first_frame'
+  );
+  assert.equal(
+    inferMediaRole('04_assets/references/last_frame_sunum.png', 'last_frame_sunum.png', 'reference_media'),
+    'last_frame'
+  );
+  assert.equal(
+    inferMediaRole('04_assets/blender_graybox/cam01_graybox_anim.mp4', 'cam01_graybox_anim.mp4', 'blender_graybox'),
+    'blender_rendered'
+  );
+
+  // 2. Delivery preset detection
+  assert.equal(inferDeliveryPresetFromMetadata(['etsy_4_3', '1024x768']), 'etsy_4_3');
+  assert.equal(inferDeliveryPresetFromMetadata(['Instagram Reels 9:16 720x1280']), 'social_9_16');
+  assert.equal(inferDeliveryPresetFromMetadata(['etsy_1_1', '960x960']), 'etsy_1_1');
+  assert.equal(inferDeliveryPresetFromMetadata(['16:9', '1280x720']), 'cinema_16_9');
+
+  // 3. Unrendered .blend Etsy Claude bundle auto-hydrates workflow & requires Colab Blender render
+  const unrenderedFiles = createSampleEtsyClaudeBundleRawFiles('unrendered_blend');
+  const unrenderedProject = parseClaudeBundleToProject(
+    unrenderedFiles,
+    DEFAULT_AUTOMATION_CONFIG.workspaceRoot,
+    { id: 'proj-etsy-blend' }
+  );
+  assert.equal(unrenderedProject.deliveryPreset, 'etsy_4_3');
+  assert.equal(unrenderedProject.sourceBundleFormat, 'claude_etsy_bundle');
+
+  const unrenderedReadiness = inspectProjectPipelineReadiness(
+    unrenderedProject,
+    DEFAULT_BLENDER_RENDER_CONFIG
+  );
+  assert.equal(unrenderedReadiness.hasFirstFrame, true);
+  assert.equal(unrenderedReadiness.hasLastFrame, true);
+  assert.equal(unrenderedReadiness.hasKeyframesPair, true);
+  assert.equal(unrenderedReadiness.hasUnrenderedBlend, true);
+  assert.equal(unrenderedReadiness.hasPreRenderedScene, false);
+  assert.equal(unrenderedReadiness.blenderStatus, 'needs_colab_render');
+  assert.equal(unrenderedReadiness.requiresColabBlenderRender, true);
+  assert.equal(unrenderedReadiness.hasWorkflow, true);
+  assert.equal(unrenderedReadiness.zeroConfigReady, true);
+
+  // 4. Pre-rendered .mp4 Claude bundle skips Colab Blender render automatically
+  const preRenderedFiles = createSampleEtsyClaudeBundleRawFiles('pre_rendered');
+  const preRenderedProject = parseClaudeBundleToProject(
+    preRenderedFiles,
+    DEFAULT_AUTOMATION_CONFIG.workspaceRoot,
+    { id: 'proj-etsy-ready' }
+  );
+  const preRenderedReadiness = inspectProjectPipelineReadiness(
+    preRenderedProject,
+    DEFAULT_BLENDER_RENDER_CONFIG
+  );
+  assert.equal(preRenderedReadiness.hasPreRenderedScene, true);
+  assert.equal(preRenderedReadiness.blenderStatus, 'pre_rendered');
+  assert.equal(preRenderedReadiness.requiresColabBlenderRender, false);
+
+  // 5. Blender helper Python & manifest/batch/notebook generation (preserving 6 cells)
+  const helperPy = buildBlenderRenderHelperPython(DEFAULT_BLENDER_RENDER_CONFIG, 1024, 768);
+  assert.ok(helperPy.includes('OPTIX'));
+  assert.ok(helperPy.includes('first_frame_blender.png'));
+  assert.ok(helperPy.includes('last_frame_blender.png'));
+  assert.ok(helperPy.includes('RES_X = 1024'));
+  assert.ok(helperPy.includes('RES_Y = 768'));
+
+  const manifest = JSON.parse(
+    generateManifestJson(DEFAULT_AUTOMATION_CONFIG, unrenderedProject.assets)
+  );
+  assert.equal(manifest.counts.blender_scene, 1);
+  assert.equal(manifest.counts.first_frame, 1);
+  assert.equal(manifest.counts.last_frame, 1);
+  assert.equal(manifest.blender_render.engine, 'CYCLES');
+
+  const dualQueue: ReturnType<typeof createInitialBatchQueue> = [
+    {
+      id: 'job-etsy',
+      projectId: unrenderedProject.id,
+      projectName: unrenderedProject.name,
+      sceneLabel: `${unrenderedProject.name} · Etsy 4:3`,
+      status: 'kuyrukta',
+      addedAt: '2026-11-16 12:00',
+      estimatedRenderMin: 3,
+      deliveryPreset: 'etsy_4_3',
+      requiresBlenderRender: true,
+    },
+    {
+      id: 'job-reels',
+      projectId: unrenderedProject.id,
+      projectName: unrenderedProject.name,
+      sceneLabel: `${unrenderedProject.name} · Reels 9:16`,
+      status: 'kuyrukta',
+      addedAt: '2026-11-16 12:00',
+      estimatedRenderMin: 3,
+      deliveryPreset: 'social_9_16',
+      requiresBlenderRender: false,
+    },
+  ];
+
+  const batchJson = JSON.parse(
+    generateBatchQueueJson(dualQueue, [unrenderedProject], DEFAULT_AUTOMATION_CONFIG)
+  );
+  assert.equal(batchJson.jobs[0].delivery_preset, 'etsy_4_3');
+  assert.equal(batchJson.jobs[0].width, 1024);
+  assert.equal(batchJson.jobs[0].height, 768);
+  assert.equal(batchJson.jobs[0].requires_blender_render, true);
+  assert.equal(batchJson.jobs[1].delivery_preset, 'social_9_16');
+  assert.equal(batchJson.jobs[1].width, 720);
+  assert.equal(batchJson.jobs[1].height, 1280);
+
+  const nb = JSON.parse(
+    generateColabNotebookJson(
+      DEFAULT_AUTOMATION_CONFIG,
+      unrenderedProject.assets,
+      INITIAL_AUDIT_FINDINGS,
+      dualQueue,
+      [unrenderedProject]
+    )
+  );
+  assert.equal(nb.cells.length, 6);
+  const cell4Source = nb.cells[3].source.join('');
+  const cell5Source = nb.cells[4].source.join('');
+  assert.ok(cell4Source.includes('BLENDER_MODULE_ENABLED = True'));
+  assert.ok(cell4Source.includes('should_run_blender'));
+  assert.ok(cell4Source.includes('blender_render_helper.py'));
+  assert.ok(cell5Source.includes('first_frame'));
+  assert.ok(cell5Source.includes('last_frame'));
+  assert.ok(cell5Source.includes('job_width'));
+  assert.ok(cell5Source.includes('job_height'));
+
+  const zipBlob = await buildAutomationZipBundle(
+    DEFAULT_AUTOMATION_CONFIG,
+    unrenderedProject.assets,
+    INITIAL_AUDIT_FINDINGS,
+    unrenderedProject,
+    dualQueue,
+    [unrenderedProject]
+  );
+  const zip = await JSZip.loadAsync(await zipBlob.arrayBuffer());
+  assert.ok(zip.file('blender_render_helper.py'));
+});

@@ -94,32 +94,36 @@ başsız **ComfyUI** ve **\`Comfy-Org/MiniMax-H3\`** çalıştırmasını yönet
 7. **Doğrudan Yerel Depolamaya İndirme:** Üretilen video ve görselleri \`pull_colab_outputs_to_local\`
    ile doğrudan \`05_outputs/renders/\` klasörüne indir.
 
-## 2. Zorunlu 5 Katmanlı Proje Hiyerarşisi
+## 2. Zorunlu 5 Katmanlı Etsy & Sosyal Medya Proje Hiyerarşisi
 
 \`\`\`text
-<proje_adi>/
+<urun_proje_adi>/
+├── project_brief.json             # Ürün adı, Etsy/Reels formatı (etsy_4_3 | social_9_16), prompt özeti
 ├── 01_routing_manifest.json       # Her dosyanın ComfyUI / Colab hedefini belirler
 ├── 02_prompts/
-│   ├── master_prompt.txt
+│   ├── master_prompt.txt          # Detaylı video & sahne tarifi
 │   └── negative_prompt.txt
 ├── 03_settings/
-│   ├── comfyui_workflow_api.json  # Başsız ComfyUI /prompt API düğüm grafiği (VAEDecodeTiled dahil)
+│   ├── comfyui_workflow_api.json  # Başsız ComfyUI /prompt API düğüm grafiği (First/Last Frame + VAEDecodeTiled)
 │   ├── system_schema.json
-│   ├── runtime_settings.json
+│   ├── runtime_settings.json      # Çözünürlük (örn. 1024x768 Etsy 4:3, 720x1280 Reels 9:16), FPS, seed
 │   └── finetune_lora.yaml
 ├── 04_assets/
-│   ├── references/                # ComfyUI/input/ içerisine yerleşen stil medya dosyaları
-│   └── blender_graybox/           # Blender clay / depth / camera pass çıktıları
+│   ├── references/
+│   │   ├── first_frame_sahne.png  # Video başlangıç karesi referansı
+│   │   ├── last_frame_sahne.png   # Video bitiş karesi referansı
+│   │   └── style_ref.png          # Opsiyonel ışık/materyal stil referansı
+│   └── blender_graybox/
+│       ├── sahne.blend            # Renderlanmamış ise Colab OptiX Blender Modülü otomatik renderlar (Pack Resources açık!)
+│       └── cam01_graybox_anim.mp4 # Halihazırda renderlanmışsa Blender adımı atlanıp doğrudan kullanılır
 └── 05_outputs/
     ├── renders/                   # MCP ile doğrudan yerele inen .mp4/.png çıktıları
     └── feedback_notes.json        # "Yeniden Değerlendir" revizyon notları
 \`\`\`
 
-## 3. Revizyon ("Yeniden Değerlendir") Akışı
-- Kullanıcı \`05_outputs/feedback_notes.json\` içine not bıraktığında önce
-  \`read_project_feedback\` aracını çağır, ardından ilgili \`02_prompts/\`,
-  \`03_settings/comfyui_workflow_api.json\` veya \`runtime_settings.json\` dosyasını
-  \`update_project_file\` ile güncelle.
+## 3. Blender .blend & Revizyon Akışı
+- Eğer \`04_assets/blender_graybox/\` içinde henüz renderlanmamış \`.blend\` dosyası varsa dışa aktarmadan önce mutlaka **Pack Resources** uygula (harici dokular kaybolmasın). ColabForge defteri \`.blend\` gördüğünde A100 OptiX ile ilk/son kareyi veya graybox videoyu otomatik renderlar; halihazırda \`.mp4\` varsa Blender aşamasını 0 saniyede atlar.
+- Kullanıcı \`05_outputs/feedback_notes.json\` içine not bıraktığında önce \`read_project_feedback\` aracını çağır, ardından ilgili \`02_prompts/\` veya \`03_settings/\` dosyasını \`update_project_file\` ile güncelle.
 - Aktif Colab kök dizini: \`${config.workspaceRoot}\`
 `;
 }
@@ -128,10 +132,11 @@ export function generateClaudeRulesMd(
   project: ColabProject,
   config: AutomationConfig
 ): string {
-  return `# CLAUDE.md — ColabForge ComfyUI + MiniMax H3 & Çift MCP Kuralları
+  return `# CLAUDE.md — ColabForge ComfyUI + Blender OptiX + Etsy/Sosyal Otomasyon Kuralları
 
 Aktif Varsayılan Proje: ${project.name} (${project.id})
 Motor: ComfyUI (${config.comfyui.comfyRootDir}) · Model: ${config.modelMatrix.repo80Gb}
+Blender Modülü: ${config.blenderRender?.enabled ? `${config.blenderRender.engine} (${config.blenderRender.device}, ${config.blenderRender.samples} samples)` : 'Devre Dışı'}
 ComfyUI MCP Kontrol Modu: ${config.comfyui.controlMode} (${config.comfyui.comfyMcpEndpoint})
 Ön Ayarlı Eklentiler: VHS=${config.comfyui.enableVideoHelperSuite}, KJNodes=${config.comfyui.enableKjNodes}, SageAttention=${config.comfyui.enableSageAttention}, uv+Constraints=${config.comfyui.pinTorchNumpyConstraints}
 MCP Yerel Çıktı Önceliği: ${config.localOutputPrimary ? 'Aktif (05_outputs/renders/)' : 'Pasif'}
@@ -139,6 +144,8 @@ Opsiyonel Drive Ek Yedeği: ${config.autoSyncOutputsToDrive ? `Açık (${config.
 
 ## Kesin Kurallar
 - Selenium, Playwright veya tarayıcı otomasyonu KULLANMA; Colab'a yalnızca resmi \`googlecolab/colab-mcp\` (\`list_runtimes\`, \`create_runtime\`, \`execute_code\`) ve \`colabforge-local\` MCP araçlarıyla bağlan.
+- Etsy ürün projelerinde mutlaka \`project_brief.json\`, \`first_frame_*\` / \`last_frame_*\` referans kareleri ve detaylı \`master_prompt.txt\` oluştur.
+- Renderlanmamış \`.blend\` dosyalarını Colab'a gönderirken mutlaka **Pack Resources** ile tüm dokuları göm.
 - Büyük model ağırlıklarını (20–68 GB) Google Drive FUSE symlink ile OKUMA; \`HF_HUB_ENABLE_HF_TRANSFER=1\` ile doğrudan Colab NVMe diskine çek.
 - Custom node kurulumlarında mutlaka \`torch\`/\`numpy\` constraints kilidi ve \`uv\` kullan; aksi halde Colab CUDA ortamı bozulur.
 - %99 aşamasında SIGKILL (Exit 137) önlemek için \`VAEDecodeTiled\` (${config.comfyui.vaeTileSize}px) + High-RAM zorunluluğunu koru.

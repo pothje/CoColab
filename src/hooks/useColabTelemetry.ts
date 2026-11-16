@@ -29,6 +29,16 @@ interface UseColabTelemetryOptions {
   ) => void;
 }
 
+export interface BridgeRuntimePreset {
+  gpuName?: string;
+  vramUsedGb?: number;
+  vramTotalGb?: number;
+  systemRamUsedGb?: number;
+  systemRamTotalGb?: number;
+  diskFreeGb?: number;
+  logLine?: string;
+}
+
 export function useColabTelemetry(options?: UseColabTelemetryOptions) {
   const [telemetry, setTelemetry] = useState<TelemetrySnapshot>(INITIAL_TELEMETRY);
   const [wsStatus, setWsStatus] = useState<'connecting' | 'connected' | 'disconnected'>(
@@ -120,9 +130,15 @@ export function useColabTelemetry(options?: UseColabTelemetryOptions) {
   }, []);
 
   const sendBridgePing = useCallback(
-    async (projectId: string, batchTotal: number) => {
+    async (projectId: string, batchTotal: number, preset?: BridgeRuntimePreset) => {
       if (!ingestToken) return;
       setPingSending(true);
+      const gpuName = preset?.gpuName ?? 'NVIDIA A100-SXM4-80GB';
+      const vramTotalGb = preset?.vramTotalGb ?? 80;
+      const vramUsedGb = preset?.vramUsedGb ?? 2.4;
+      const systemRamTotalGb = preset?.systemRamTotalGb ?? 167;
+      const systemRamUsedGb = preset?.systemRamUsedGb ?? 18.6;
+      const diskFreeGb = preset?.diskFreeGb ?? 231.5;
       try {
         await fetch('/api/telemetry/ingest', {
           method: 'POST',
@@ -131,22 +147,24 @@ export function useColabTelemetry(options?: UseColabTelemetryOptions) {
             'x-telemetry-token': ingestToken,
           },
           body: JSON.stringify({
-            sessionId: 'bridge-verify-01',
+            sessionId: `bridge-verify-${vramTotalGb}gb`,
             stage: 'preflight',
-            gpuName: 'NVIDIA A100-SXM4-80GB',
-            vramUsedGb: 2.4,
-            vramTotalGb: 80,
-            systemRamUsedGb: 18.6,
-            systemRamTotalGb: 167,
+            gpuName,
+            vramUsedGb,
+            vramTotalGb,
+            systemRamUsedGb,
+            systemRamTotalGb,
             gpuTempC: 41,
-            diskFreeGb: 231.5,
+            diskFreeGb,
             downloadProgressPct: 100,
             activeProjectId: projectId,
             batchIndex: batchTotal > 0 ? 1 : 0,
             batchTotal,
-            currentStepLabel: 'Telemetri köprüsü doğrulandı (Sunucu <-> WebSocket)',
-            logLine: 'Canlı köprü testi: A100 80GB High-RAM telemetri paketi alındı.',
-            logLevel: 'success',
+            currentStepLabel: `Bağlantı doğrulandı (${gpuName})`,
+            logLine:
+              preset?.logLine ??
+              `Canlı köprü testi: ${gpuName} (${vramTotalGb} GB VRAM / ${systemRamTotalGb} GB RAM) telemetri paketi alındı.`,
+            logLevel: vramTotalGb < 38 ? 'warn' : 'success',
           }),
         });
       } finally {

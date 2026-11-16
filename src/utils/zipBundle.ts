@@ -21,6 +21,11 @@ import {
   generateMcpInstallerScript,
   generateRoutingManifestJson,
 } from './claudeGenerators';
+import {
+  buildBlenderRenderHelperPython,
+  DEFAULT_BLENDER_RENDER_CONFIG,
+} from './blenderModule';
+import { getDeliveryPreset } from './claudeBundle';
 
 export async function buildAutomationZipBundle(
   config: AutomationConfig,
@@ -34,6 +39,7 @@ export async function buildAutomationZipBundle(
 ): Promise<Blob> {
   const zip = new JSZip();
   const mcpServerPy = generateColabMcpServer(config, assets);
+  const presetSpec = getDeliveryPreset(project?.deliveryPreset);
 
   zip.file(
     'minimax_h3_colab_automation.ipynb',
@@ -48,6 +54,14 @@ export async function buildAutomationZipBundle(
     )
   );
   zip.file('preflight_guard.py', generatePreflightPython(config, findings));
+  zip.file(
+    'blender_render_helper.py',
+    buildBlenderRenderHelperPython(
+      config.blenderRender ?? DEFAULT_BLENDER_RENDER_CONFIG,
+      presetSpec.width,
+      presetSpec.height
+    )
+  );
   zip.file('colab_mcp_server.py', mcpServerPy);
   zip.file('local_zero_credit_runner.py', generateZeroCreditRunner(config, assets));
   zip.file('workspace_manifest.json', generateManifestJson(config, assets));

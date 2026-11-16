@@ -31,9 +31,9 @@ export function OfflineIndicator() {
     <div
       role="status"
       aria-live="polite"
-      className="fixed bottom-4 left-4 z-50 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900 shadow-md"
+      className="fixed bottom-4 left-4 z-50 flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-950/90 px-3 py-2 text-xs font-semibold text-amber-200 shadow-lg"
     >
-      <WifiOff className="h-3.5 w-3.5 text-amber-600" aria-hidden="true" />
+      <WifiOff className="h-3.5 w-3.5 text-amber-400" aria-hidden="true" />
       <span>Çevrimdışı Mod — Önbellekteki stüdyo arayüzü kullanılıyor.</span>
     </div>
   );
